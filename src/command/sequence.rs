@@ -76,6 +76,9 @@ impl Sequence {
     pub fn has_other_panel_group(&self) -> bool {
         str_has_other_panel_group(&self.raw)
     }
+    pub fn has_staging_group(&self) -> bool {
+        str_has_staging_group(&self.raw)
+    }
 }
 
 /// Add commands to a sequence.

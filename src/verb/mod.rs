@@ -63,3 +63,9 @@ pub fn str_has_other_panel_group(s: &str) -> bool {
     }
     false
 }
+
+pub fn str_has_staging_group(s: &str) -> bool {
+    GROUP
+        .find_iter(s)
+        .any(|group| group.as_str() == "{staging}")
+}

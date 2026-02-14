@@ -40,6 +40,12 @@ impl ExecPattern {
             Self::Array(v) => v.iter().any(|s| str_has_other_panel_group(s)),
         }
     }
+    pub fn has_staging_group(&self) -> bool {
+        match self {
+            Self::String(s) => str_has_staging_group(s),
+            Self::Array(v) => v.iter().any(|s| str_has_staging_group(s)),
+        }
+    }
     pub fn as_internal_pattern(&self) -> Option<&str> {
         match self {
             Self::String(s) => {

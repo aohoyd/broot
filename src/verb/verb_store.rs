@@ -1,11 +1,21 @@
 use {
-    super::{Internal, Verb, VerbId},
+    super::{
+        Internal,
+        Verb,
+        VerbId,
+    },
     crate::{
         app::*,
         command::Sequence,
-        conf::{Conf, VerbConf},
+        conf::{
+            Conf,
+            VerbConf,
+        },
         errors::ConfError,
-        keys::{self, KEY_FORMAT},
+        keys::{
+            self,
+            KEY_FORMAT,
+        },
         verb::*,
     },
     crokey::*,
@@ -59,7 +69,10 @@ impl VerbStore {
     }
 
     fn add_builtin_verbs(&mut self) -> Result<(), ConfError> {
-        use super::{ExternalExecutionMode::*, Internal::*};
+        use super::{
+            ExternalExecutionMode::*,
+            Internal::*,
+        };
         self.add_internal(escape).with_key(key!(esc));
 
         // input actions, not visible in doc, but available for
@@ -157,7 +170,10 @@ impl VerbStore {
         )
         .with_shortcut("cpp");
         self.add_internal(trash);
-        #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")))))]
+        #[cfg(any(
+            target_os = "windows",
+            all(unix, not(any(target_os = "ios", target_os = "android")))
+        ))]
         {
             self.add_internal(open_trash).with_shortcut("ot");
             self.add_internal(restore_trashed_file).with_shortcut("rt");
@@ -562,8 +578,15 @@ impl VerbStore {
         prefix: &str,
         sel_info: SelInfo<'_>,
         panel_state_type: Option<PanelStateType>,
+        stage_is_empty: bool,
     ) -> PrefixSearchResult<'v, &'v Verb> {
-        self.search(prefix, Some(sel_info), true, panel_state_type)
+        self.search(
+            prefix,
+            Some(sel_info),
+            true,
+            panel_state_type,
+            Some(stage_is_empty),
+        )
     }
 
     pub fn search_prefix<'v>(
@@ -571,7 +594,7 @@ impl VerbStore {
         prefix: &str,
         panel_state_type: Option<PanelStateType>,
     ) -> PrefixSearchResult<'v, &'v Verb> {
-        self.search(prefix, None, true, panel_state_type)
+        self.search(prefix, None, true, panel_state_type, None)
     }
 
     /// Return either the only match, or None if there's not
@@ -581,8 +604,9 @@ impl VerbStore {
         prefix: &str,
         sel_info: SelInfo<'_>,
         panel_state_type: Option<PanelStateType>,
+        stage_is_empty: bool,
     ) -> Option<&'v Verb> {
-        match self.search_sel_info(prefix, sel_info, panel_state_type) {
+        match self.search_sel_info(prefix, sel_info, panel_state_type, stage_is_empty) {
             PrefixSearchResult::Match(_, verb) => Some(verb),
             _ => None,
         }
@@ -594,6 +618,7 @@ impl VerbStore {
         sel_info: Option<SelInfo>,
         short_circuit: bool,
         panel_state_type: Option<PanelStateType>,
+        stage_is_empty: Option<bool>,
     ) -> PrefixSearchResult<'v, &'v Verb> {
         let mut found_index = 0;
         let mut nb_found = 0;
@@ -621,6 +646,11 @@ impl VerbStore {
             }
             if !verb.accepts_extension(extension) {
                 continue;
+            }
+            if let Some(empty) = stage_is_empty {
+                if empty && verb.needs_staging {
+                    continue;
+                }
             }
             for name in &verb.names {
                 if name.starts_with(prefix) {

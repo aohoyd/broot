@@ -192,8 +192,7 @@ pub trait PanelState {
                 )
             ))]
             Internal::purge_trash => {
-                let res =
-                    trash::os_limited::list().and_then(trash::os_limited::purge_all);
+                let res = trash::os_limited::list().and_then(trash::os_limited::purge_all);
                 match res {
                     Ok(()) => CmdResult::RefreshState { clear_cache: false },
                     Err(e) => CmdResult::DisplayError(format!("{e}")),
@@ -792,6 +791,9 @@ pub trait PanelState {
         if verb.needs_another_panel && app_state.other_panel_path.is_none() {
             return Ok(CmdResult::error("This verb needs another panel"));
         }
+        if verb.needs_staging && app_state.stage.is_empty() {
+            return Ok(CmdResult::error("This verb needs at least one staged file"));
+        }
         let res = match &verb.execution {
             VerbExecution::Internal(internal_exec) => self.on_internal(
                 w,
@@ -837,8 +839,12 @@ pub trait PanelState {
     ) -> Result<CmdResult, ProgramError> {
         let sel_info = self.sel_info(app_state);
         if let Some(invocation) = &invocation {
-            if let Some(error) = verb.check_args(sel_info, invocation, &app_state.other_panel_path)
-            {
+            if let Some(error) = verb.check_args(
+                sel_info,
+                invocation,
+                &app_state.other_panel_path,
+                app_state.stage.is_empty(),
+            ) {
                 debug!("verb.check_args prevented execution: {:?}", &error);
                 return Ok(CmdResult::error(error));
             }
@@ -939,6 +945,7 @@ pub trait PanelState {
                     &invocation.name,
                     sel_info,
                     Some(self.get_type()),
+                    app_state.stage.is_empty(),
                 ) {
                     PrefixSearchResult::Match(_, verb) => self.execute_verb(
                         w,
@@ -1123,6 +1130,7 @@ pub trait PanelState {
                         &invocation.name,
                         sel_info,
                         Some(self.get_type()),
+                        app_state.stage.is_empty(),
                     ) {
                         PrefixSearchResult::NoMatch => {
                             Status::new("No matching verb (*?* for the list of verbs)", true)
@@ -1168,7 +1176,12 @@ pub trait PanelState {
             }
             // right now there's no check for sequences but they're inherently dangerous
         }
-        if let Some(err) = verb.check_args(sel_info, invocation, &app_state.other_panel_path) {
+        if let Some(err) = verb.check_args(
+            sel_info,
+            invocation,
+            &app_state.other_panel_path,
+            app_state.stage.is_empty(),
+        ) {
             Status::new(err, true)
         } else {
             Status::new(

@@ -4,6 +4,7 @@ use {
         app::*,
         command::*,
         path,
+        stage::Stage,
     },
     regex::Captures,
     rustc_hash::FxHashMap,
@@ -26,6 +27,9 @@ pub struct ExecutionStringBuilder<'b> {
     /// the selection in the other panel, when there are exactly two
     other_file: Option<&'b PathBuf>,
 
+    /// the staging area
+    stage: &'b Stage,
+
     /// parsed arguments
     invocation_values: Option<FxHashMap<String, String>>,
 
@@ -45,6 +49,7 @@ impl<'b> ExecutionStringBuilder<'b> {
             sel_info,
             root: &app_state.root,
             other_file: app_state.other_panel_path.as_ref(),
+            stage: &app_state.stage,
             invocation_values: None,
             keep_groups: false,
         }
@@ -63,6 +68,7 @@ impl<'b> ExecutionStringBuilder<'b> {
             sel_info,
             root: &app_state.root,
             other_file: app_state.other_panel_path.as_ref(),
+            stage: &app_state.stage,
             invocation_values,
             keep_groups: false,
         }
@@ -185,6 +191,10 @@ impl<'b> ExecutionStringBuilder<'b> {
                     })
                     .unwrap_or(sel.path);
                 Some(path_to_string(path))
+            }
+            "staging" => {
+                let paths: Vec<String> = self.stage.paths().iter().map(path_to_string).collect();
+                Some(paths.join(" "))
             }
             #[cfg(unix)]
             "server-name" => con.server_name.clone(),

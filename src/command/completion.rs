@@ -101,7 +101,7 @@ impl Completions {
     ) -> Self {
         match con
             .verb_store
-            .search(start, Some(sel_info), false, panel_state_type)
+            .search(start, Some(sel_info), false, panel_state_type, None)
         {
             PrefixSearchResult::NoMatch => Self::None,
             PrefixSearchResult::Match(name, _) => {
@@ -124,13 +124,14 @@ impl Completions {
         con: &AppContext,
         panel_state_type: Option<PanelStateType>,
     ) -> io::Result<Vec<String>> {
-        let anchor = match con
-            .verb_store
-            .search(verb_name, Some(sel_info), false, panel_state_type)
-        {
-            PrefixSearchResult::Match(_, verb) => verb.get_unique_arg_anchor(),
-            _ => PathAnchor::Unspecified,
-        };
+        let anchor =
+            match con
+                .verb_store
+                .search(verb_name, Some(sel_info), false, panel_state_type, None)
+            {
+                PrefixSearchResult::Match(_, verb) => verb.get_unique_arg_anchor(),
+                _ => PathAnchor::Unspecified,
+            };
         let (_, parent_part, child_part) = regex_captures!(r"^(.*?)([^/]*)$", arg).unwrap();
         let parent = path::path_from(path, anchor, parent_part);
         let mut children = Vec::new();
@@ -173,7 +174,7 @@ impl Completions {
         // we try to get the type of argument
         let arg_def = con
             .verb_store
-            .search_sel_info_unique(verb_name, sel_info, panel_state_type)
+            .search_sel_info_unique(verb_name, sel_info, panel_state_type, false)
             .and_then(|verb| verb.invocation_parser.as_ref())
             .and_then(|invocation_parser| invocation_parser.get_unique_arg_def());
         if matches!(arg_def, Some(ArgDef::Theme)) {
