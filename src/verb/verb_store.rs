@@ -485,13 +485,13 @@ impl VerbStore {
             // old definition with "execution": we guess whether it's an internal or
             // an external
             (Some(ep), None, None, None) => {
-                if let Some(internal_pattern) = ep.as_internal_pattern() {
+                if let Some(internal_pattern) = ep.to_internal_pattern() {
                     if let Some(previous_verb) =
-                        self.verbs.iter().find(|&v| v.has_name(internal_pattern))
+                        self.verbs.iter().find(|&v| v.has_name(&internal_pattern))
                     {
                         previous_verb.execution.clone()
                     } else {
-                        VerbExecution::Internal(InternalExecution::try_from(internal_pattern)?)
+                        VerbExecution::Internal(InternalExecution::try_from(&internal_pattern)?)
                     }
                 } else {
                     VerbExecution::External(make_external_execution(ep.clone()))
