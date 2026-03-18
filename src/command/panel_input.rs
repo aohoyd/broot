@@ -496,6 +496,15 @@ impl PanelInput {
             return Command::from_parts(parts, true);
         }
 
+        // In modal mode, Enter in Input mode (without a verb invocation)
+        // accepts the current filter and switches to Command mode
+        if key == key!(enter) && con.modal && mode == Mode::Input {
+            return Command::Internal {
+                internal: Internal::mode_command,
+                input_invocation: None,
+            };
+        }
+
         // a '?' opens the help when it's the first char or when it's part
         // of the verb invocation. It may be used as a verb name in other cases
         if (key == key!('?') || key == key!(shift - '?'))

@@ -137,6 +137,8 @@ impl VerbStore {
         self.add_internal(close_panel_ok);
         self.add_internal(close_panel_cancel)
             .with_key(key!(ctrl - w));
+        self.add_internal(close_panel_ok_if_not_last);
+        self.add_internal(close_panel_cancel_if_not_last);
         #[cfg(unix)]
         self.add_external(
             "copy {newpath}",

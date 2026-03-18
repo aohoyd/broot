@@ -162,6 +162,28 @@ pub trait PanelState {
                 panel_ref: PanelReference::Active,
                 clear_cache: false,
             },
+            Internal::close_panel_ok_if_not_last => {
+                if cc.panel.areas.nb_pos < 2 {
+                    CmdResult::Keep
+                } else {
+                    CmdResult::ClosePanel {
+                        validate_purpose: true,
+                        panel_ref: PanelReference::Active,
+                        clear_cache: true,
+                    }
+                }
+            }
+            Internal::close_panel_cancel_if_not_last => {
+                if cc.panel.areas.nb_pos < 2 {
+                    CmdResult::Keep
+                } else {
+                    CmdResult::ClosePanel {
+                        validate_purpose: false,
+                        panel_ref: PanelReference::Active,
+                        clear_cache: false,
+                    }
+                }
+            }
             Internal::move_panel_divider => {
                 let MoveDividerArgs { divider, dx } = get_arg(
                     input_invocation,
