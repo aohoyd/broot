@@ -2,7 +2,6 @@ use {
     super::*,
     directories::UserDirs,
     lazy_regex::*,
-    rustc_hash::FxHashMap,
     std::path::{
         Path,
         PathBuf,
@@ -26,7 +25,7 @@ pub fn untilde(input: &str) -> PathBuf {
 }
 
 /// Build a usable path from a user input which may be absolute
-/// (if it starts with / or ~) or relative to the supplied base_dir.
+/// (if it starts with / or ~) or relative to the supplied `base_dir`.
 /// (we might want to try detect windows drives in the future, too)
 pub fn path_from<P: AsRef<Path> + std::fmt::Debug>(
     base_dir: P,
@@ -65,26 +64,3 @@ pub fn path_str_from<P: AsRef<Path> + std::fmt::Debug>(
         .to_string()
 }
 
-/// Replace a group in the execution string, using
-///  data from the user input and from the selected line
-pub fn do_exec_replacement(
-    ec: &Captures<'_>,
-    replacement_map: &FxHashMap<String, String>,
-) -> String {
-    let name = ec.get(1).unwrap().as_str();
-    if let Some(repl) = replacement_map.get(name) {
-        if let Some(fmt) = ec.get(2) {
-            match fmt.as_str() {
-                "path-from-directory" => {
-                    path_str_from(replacement_map.get("directory").unwrap(), repl)
-                }
-                "path-from-parent" => path_str_from(replacement_map.get("parent").unwrap(), repl),
-                _ => format!("invalid format: {:?}", fmt.as_str()),
-            }
-        } else {
-            repl.to_string()
-        }
-    } else {
-        format!("{{{name}}}")
-    }
-}

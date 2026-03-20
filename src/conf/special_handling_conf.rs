@@ -104,7 +104,7 @@ impl GlobConf {
             glob::Pattern::new(&pattern)
         };
         glob.map_err(|_| ConfError::InvalidGlobPattern {
-            pattern: self.pattern.to_string(),
+            pattern: self.pattern.clone(),
         })
     }
 }

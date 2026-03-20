@@ -172,7 +172,7 @@ pub fn parse_cols(arr: &Vec<String>) -> Result<Cols, ConfError> {
         cols[dest_idx] = cols[idx];
         cols[idx] = col;
     }
-    debug!("cols from conf = {:?}", cols);
+    debug!("cols from conf = {cols:?}");
     Ok(cols)
 }
 

@@ -67,7 +67,7 @@ use {
 /// solution offered by kitty.
 ///
 /// Documentation:
-///  https://sw.kovidgoyal.net/kitty/graphics-protocol/#the-transmission-medium
+///  <https://sw.kovidgoyal.net/kitty/graphics-protocol/#the-transmission-medium>
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransmissionMedium {
@@ -193,7 +193,7 @@ fn div_ceil(
     a: u32,
     b: u32,
 ) -> u32 {
-    a / b + (0 != a % b) as u32
+    a / b + u32::from(0 != a % b)
 }
 
 /// The image renderer, with knowledge of the console cells
@@ -401,7 +401,7 @@ impl KittyImage {
             .ok_or_else(|| io::Error::other("Path can't be converted to UTF8"))?;
         let encoded_path = BASE64.encode(path);
         if let KittyImageData::Image { data: _ } = self.data {
-            debug!("temp file written: {:?}", path);
+            debug!("temp file written: {path:?}");
         }
         if let Some(s) = &tmux_header {
             write!(w, "{s}")?;
@@ -438,7 +438,7 @@ impl KittyImage {
         // Compression slows things down
         if let KittyImageData::Png { path } = &self.data {
             self.print_with_path(w, path.as_path(), "100", "f")?;
-        };
+        }
         Ok(())
     }
     /// Render the image by writing the raw data in a temporary file
@@ -458,13 +458,13 @@ impl KittyImage {
                 debug!("file len: {}", temp_file.metadata().unwrap().len());
             }
             self.print_with_path(w, temp_file_path, data.kitty_format(), "t")?;
-        };
+        }
         Ok(())
     }
 }
 
 impl KittyImageRenderer {
-    /// Called only once (at most) by the KittyManager
+    /// Called only once (at most) by the `KittyManager`
     pub fn new(mut options: KittyImageRendererOptions) -> Option<Self> {
         if options.display == KittyGraphicsDisplay::Detect {
             options.display = detect_kitty_graphics_protocol_display();
@@ -493,10 +493,10 @@ impl KittyImageRenderer {
             })
     }
     pub fn delete_temp_files(&mut self) {
-        for (_, temp_file_path) in self.temp_files.into_iter() {
-            debug!("removing temp file: {:?}", temp_file_path);
+        for (_, temp_file_path) in &self.temp_files {
+            debug!("removing temp file: {temp_file_path:?}");
             if let Err(e) = std::fs::remove_file(temp_file_path) {
-                error!("failed to remove temp file: {:?}", e);
+                error!("failed to remove temp file: {e:?}");
             }
         }
     }
@@ -513,7 +513,7 @@ impl KittyImageRenderer {
         }
     }
     /// Clean the area, then print the dynamicImage and
-    /// return the KittyImageId for later removal from screen
+    /// return the `KittyImageId` for later removal from screen
     pub fn print(
         &mut self,
         w: &mut W,
@@ -567,7 +567,7 @@ impl KittyImageRenderer {
                 if let Some((_, old_path)) = self.temp_files.push(temp_file_key, temp_file_path) {
                     debug!("removing temp file: {:?}", &old_path);
                     if let Err(e) = std::fs::remove_file(&old_path) {
-                        error!("failed to remove temp file: {:?}", e);
+                        error!("failed to remove temp file: {e:?}");
                     }
                 }
             }

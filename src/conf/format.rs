@@ -39,7 +39,7 @@ impl SerdeFormat {
     pub fn from_path(path: &Path) -> Result<Self, ConfError> {
         path.extension()
             .and_then(|os| os.to_str())
-            .map(|ext| ext.to_lowercase())
+            .map(str::to_lowercase)
             .and_then(|key| Self::from_key(&key))
             .ok_or_else(|| ConfError::UnknownFileExtension {
                 path: path.to_string_lossy().to_string(),

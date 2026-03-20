@@ -339,7 +339,7 @@ impl PanelState for BrowserState {
         app_state: &mut AppState,
         cc: &CmdContext,
     ) -> Result<CmdResult, ProgramError> {
-        debug!("browser_state on_internal {:?}", internal_exec);
+        debug!("browser_state on_internal {internal_exec:?}");
         let con = &cc.app.con;
         let screen = cc.app.screen;
         let page_height = BrowserState::page_height(cc.app.screen);
@@ -781,7 +781,7 @@ impl PanelState for BrowserState {
                     pattern,
                     file_type_condition,
                 } => {
-                    debug!("stage all pattern: {:?}", pattern);
+                    debug!("stage all pattern: {pattern:?}");
                     let tree = self.displayed_tree();
                     let root = tree.root().clone();
                     let mut options = tree.options.clone();
@@ -835,13 +835,13 @@ impl PanelState for BrowserState {
         let page_height = BrowserState::page_height(screen);
         // refresh the base tree
         if let Err(e) = self.tree.refresh(page_height, con) {
-            warn!("refreshing base tree failed : {:?}", e);
+            warn!("refreshing base tree failed : {e:?}");
         }
         // refresh the filtered tree, if any
         Command::from_pattern(match self.filtered_tree {
             Some(ref mut tree) => {
                 if let Err(e) = tree.refresh(page_height, con) {
-                    warn!("refreshing filtered tree failed : {:?}", e);
+                    warn!("refreshing filtered tree failed : {e:?}");
                 }
                 &tree.options.pattern
             }

@@ -31,7 +31,7 @@ fn compute_tree_status(root_path: &Path) -> ComputationResult<TreeGitStatus> {
             }
         }
         Err(e) => {
-            debug!("failed to discover repo: {:?}", e);
+            debug!("failed to discover repo: {e:?}");
             ComputationResult::None
         }
     }
@@ -49,6 +49,7 @@ static TS_CACHE_MX: Lazy<Mutex<FxHashMap<PathBuf, Computation<TreeGitStatus>>>> 
 /// - this function returns as soon as the dam asks for it (ie when there's an event)
 /// - computations are never dropped unless the program ends: they continue in background
 ///   and the result may be available for following queries
+#[allow(clippy::missing_panics_doc)] // panics if the mutex is poisoned (in which case it's better)
 pub fn get_tree_status(
     root_path: &Path,
     dam: &mut Dam,
@@ -93,7 +94,7 @@ pub fn get_tree_status(
                             .unwrap()
                             .insert(repo_path.clone(), Computation::Finished(comp_res.clone()));
                         if let Err(e) = s.send(comp_res.clone()) {
-                            debug!("error while sending comp result: {:?}", e);
+                            debug!("error while sending comp result: {e:?}");
                         }
                         comp_res
                     })
@@ -107,6 +108,7 @@ pub fn get_tree_status(
 /// Limit: we may receive in cache the result of a computation
 /// which started before the clear (if this is a problem we could
 /// store a cleaning counter alongside the cache to prevent insertions)
+#[allow(clippy::missing_panics_doc)] // panics if the mutex is poisoned (in which case it's better)
 pub fn clear_status_computer_cache() {
     let mut ts_cache = TS_CACHE_MX.lock().unwrap();
     ts_cache.clear();

@@ -223,9 +223,7 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
         line: &TreeLine,
         selected: bool,
     ) -> Result<usize, termimad::Error> {
-        let (style, char) = if !line.is_selectable() {
-            (&self.skin.tree, ' ')
-        } else {
+        let (style, char) = if line.is_selectable() {
             match line.git_status.map(|s| s.status) {
                 Some(Status::CURRENT) => (&self.skin.git_status_current, ' '),
                 Some(Status::WT_NEW) => (&self.skin.git_status_new, 'N'),
@@ -235,6 +233,8 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
                 None => (&self.skin.tree, ' '),
                 _ => (&self.skin.git_status_other, '?'),
             }
+        } else {
+            (&self.skin.tree, ' ')
         };
         cond_bg!(git_style, self, selected, style);
         cw.queue_char(git_style, char)?;
@@ -516,7 +516,7 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             tree.lines
                 .iter()
                 .skip(1) // we don't show the counts of the root
-                .map(|l| l.sum.map_or(0, |s| s.to_count()))
+                .map(|l| l.sum.map_or(0, FileSum::to_count))
                 .max()
                 .map(|c| format_count(c).len())
                 .unwrap_or(0)
@@ -563,7 +563,7 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
                 }
                 let staged = self
                     .app_state
-                    .map_or(false, |a| a.stage.contains(&line.path));
+                    .is_some_and(|a| a.stage.contains(&line.path));
                 for col in &visible_cols {
                     let void_len = match col {
                         Col::Mark => Self::write_line_selection_mark(cw, &label_style, selected)?,
@@ -596,7 +596,7 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
                         }
 
                         Col::Date => {
-                            if let Some(seconds) = line.sum.and_then(|sum| sum.to_valid_seconds()) {
+                            if let Some(seconds) = line.sum.and_then(FileSum::to_valid_seconds) {
                                 self.write_date(cw, seconds, selected)?
                             } else {
                                 date_len + 1

@@ -54,7 +54,7 @@ impl SourceImage {
                 }
             }
             Self::Svg(tree) => {
-                let bg_color: Option<coolor::Color> = bg_color.map(|cc| cc.into());
+                let bg_color: Option<coolor::Color> = bg_color.map(Into::into);
                 svg::render_tree(tree, max_width, max_height, bg_color)?
             }
         };

@@ -112,7 +112,7 @@ impl DirSummer {
                         let entry_path = e.path();
 
                         if con.special_paths.sum(&entry_path) == Directive::Never {
-                            debug!("not summing special path {:?}", entry_path);
+                            debug!("not summing special path {entry_path:?}");
                             continue;
                         }
 
@@ -180,7 +180,7 @@ impl DirSummer {
                                         let path = e.path();
 
                                         if special_paths.sum(&path) == Directive::Never {
-                                            debug!("not summing (deep) special path {:?}", path);
+                                            debug!("not summing (deep) special path {path:?}");
                                             continue;
                                         }
 
@@ -230,7 +230,7 @@ impl DirSummer {
                     sum += thread_sum;
                 }
                 Err(e) => {
-                    warn!("Error while recv summing thread result : {:?}", e);
+                    warn!("Error while recv summing thread result : {e:?}");
                 }
             }
         }

@@ -55,7 +55,7 @@ pub fn render_tree(
         return Err(SvgError::Internal {
             message: "invalid SVG dimensions",
         });
-    };
+    }
     debug!("px_size: ({px_width}, {px_height})");
     let mut pixmap = tiny_skia::Pixmap::new(px_width, px_height).ok_or(SvgError::Internal {
         message: "unable to create pixmap buffer",
@@ -80,7 +80,7 @@ pub fn render_tree(
 }
 
 /// Generate a bitmap at the natural dimensions of the SVG unless it's too big
-///  in which case a smaller one is generated to fit into (max_width x max_height).
+///  in which case a smaller one is generated to fit into `max_width x max_height`.
 ///
 /// Background will be black.
 #[allow(dead_code)]

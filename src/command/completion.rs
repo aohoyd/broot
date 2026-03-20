@@ -77,11 +77,11 @@ impl Completions {
                     stripped
                 } else {
                     // this might become a feature but right now it's a bug
-                    warn!("unexpected non completing whole: {:?}", w);
+                    warn!("unexpected non completing whole: {w:?}");
                     *w
                 }
             })
-            .map(|c| c.to_string())
+            .map(ToString::to_string)
             .collect();
         Self::from_list(completions)
     }
@@ -128,12 +128,7 @@ impl Completions {
         let (_, parent_part, child_part) = regex_captures!(r"^(.*?)([^/]*)$", arg).unwrap();
         let parent = path::path_from(path, anchor, parent_part);
         let mut children = Vec::new();
-        if !parent.exists() {
-            debug!(
-                "no path completion possible because {:?} doesn't exist",
-                &parent
-            );
-        } else {
+        if parent.exists() {
             for entry in parent.read_dir()? {
                 let entry = entry?;
                 let mut name = entry.file_name().to_string_lossy().to_string();
@@ -149,6 +144,11 @@ impl Completions {
                 }
                 children.push(name);
             }
+        } else {
+            debug!(
+                "no path completion possible because {:?} doesn't exist",
+                &parent
+            );
         }
         Ok(children)
     }
@@ -169,7 +169,7 @@ impl Completions {
             .verb_store
             .search_sel_info_unique(verb_name, sel_info, panel_state_type, false)
             .and_then(|verb| verb.invocation_parser.as_ref())
-            .and_then(|invocation_parser| invocation_parser.get_unique_arg_def())
+            .and_then(InvocationParser::get_unique_arg_def)
             .is_some_and(|arg_def| arg_def.has_flag(VerbArgFlag::Theme));
         if is_theme {
             Self::for_theme_arg(arg)
@@ -184,7 +184,7 @@ impl Completions {
         let completions: Vec<String> = SYNTAX_THEMES
             .iter()
             .map(|st| st.name().to_lowercase())
-            .filter_map(|name| name.strip_prefix(&arg).map(|s| s.to_string()))
+            .filter_map(|name| name.strip_prefix(&arg).map(ToString::to_string))
             .collect();
         Self::from_list(completions)
     }
@@ -210,7 +210,7 @@ impl Completions {
                 {
                     Ok(list) => Self::from_list(list),
                     Err(e) => {
-                        warn!("Error while trying to complete path: {:?}", e);
+                        warn!("Error while trying to complete path: {e:?}");
                         Self::None
                     }
                 }

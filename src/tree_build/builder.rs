@@ -99,6 +99,7 @@ impl<'c> TreeBuilder<'c> {
                 "init line_status_computer",
                 Repository::discover(&path)
                     .ok()
+                    .as_ref()
                     .and_then(LineStatusComputer::from),
             )
         } else {

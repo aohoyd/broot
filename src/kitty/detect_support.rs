@@ -7,8 +7,8 @@ use {
 /// Determine whether Kitty's graphics protocol is supported
 /// by the terminal running broot.
 ///
-/// This is called only once, and cached in the KittyManager's
-/// MaybeRenderer state
+/// This is called only once, and cached in the `KittyManager`'s
+/// `MaybeRenderer` state
 #[allow(unreachable_code)]
 pub fn detect_kitty_graphics_protocol_display() -> KittyGraphicsDisplay {
     debug!("is_kitty_graphics_protocol_supported ?");
@@ -24,7 +24,7 @@ pub fn detect_kitty_graphics_protocol_display() -> KittyGraphicsDisplay {
     // check its version to be sure it's one with support
     for env_var in ["TERM", "TERMINAL"] {
         if let Ok(env_val) = env::var(env_var) {
-            debug!("${} = {:?}", env_var, env_val);
+            debug!("${env_var} = {env_val:?}");
             let env_val = env_val.to_ascii_lowercase();
             if env_val.contains("kitty") {
                 debug!(" -> this terminal seems to be Kitty");
@@ -35,7 +35,7 @@ pub fn detect_kitty_graphics_protocol_display() -> KittyGraphicsDisplay {
 
     // we detect Ghostty by the $TERM env var
     if let Ok(env_val) = env::var("TERM") {
-        debug!("$TERM = {:?}", env_val);
+        debug!("$TERM = {env_val:?}");
         if env_val == "xterm-ghostty" {
             debug!(" -> this terminal seems to be Ghostty");
             return KittyGraphicsDisplay::Direct;
@@ -45,10 +45,10 @@ pub fn detect_kitty_graphics_protocol_display() -> KittyGraphicsDisplay {
     // we detect Wezterm with the $TERM_PROGRAM env var and we
     // check its version to be sure it's one with support
     if let Ok(term_program) = env::var("TERM_PROGRAM") {
-        debug!("$TERM_PROGRAM = {:?}", term_program);
+        debug!("$TERM_PROGRAM = {term_program:?}");
         if term_program == "WezTerm" {
             if let Ok(version) = env::var("TERM_PROGRAM_VERSION") {
-                debug!("$TERM_PROGRAM_VERSION = {:?}", version);
+                debug!("$TERM_PROGRAM_VERSION = {version:?}");
                 if &*version < "20220105-201556-91a423da" {
                     debug!("WezTerm's version predates Kitty Graphics protocol support");
                 } else {
@@ -63,7 +63,7 @@ pub fn detect_kitty_graphics_protocol_display() -> KittyGraphicsDisplay {
             return KittyGraphicsDisplay::Direct;
         } else if term_program == "iTerm.app" {
             if let Ok(version) = env::var("TERM_PROGRAM_VERSION") {
-                debug!("$TERM_PROGRAM_VERSION = {:?}", version);
+                debug!("$TERM_PROGRAM_VERSION = {version:?}");
 
                 if &*version < "3.6.6" {
                     debug!("iTerm2's version predates Kitty Graphics protocol support");
@@ -108,14 +108,14 @@ pub fn detect_kitty_graphics_protocol_display() -> KittyGraphicsDisplay {
 
 /// Determine whether we're in tmux.
 ///
-/// This is called only once, and cached in KittyImageRenderer
+/// This is called only once, and cached in `KittyImageRenderer`
 #[allow(unreachable_code)]
 pub fn is_tmux() -> bool {
     debug!("is_tmux ?");
 
     for env_var in ["TERM", "TERMINAL"] {
         if let Ok(env_val) = env::var(env_var) {
-            debug!("${} = {:?}", env_var, env_val);
+            debug!("${env_var} = {env_val:?}");
             let env_val = env_val.to_ascii_lowercase();
             if env_val.contains("tmux") {
                 debug!(" -> this terminal seems to be Tmux");
@@ -135,7 +135,7 @@ pub fn get_tmux_nest_count() -> u32 {
 
 /// Determine whether we're in SSH.
 ///
-/// This is called only once, and cached in KittyImageRenderer
+/// This is called only once, and cached in `KittyImageRenderer`
 #[allow(unreachable_code)]
 pub fn is_ssh() -> bool {
     debug!("is_ssh ?");

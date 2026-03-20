@@ -41,9 +41,7 @@ impl DynamicImage {
             // (when calling Frame::flatten)
             return Err(ProgramError::ImageError {
                 details: format!(
-                    "Unsupported color space with {} components in image: {:?}",
-                    nb_components,
-                    path
+                    "Unsupported color space with {nb_components} components in image: {path:?}"
                 )
             });
         }
@@ -53,12 +51,12 @@ impl DynamicImage {
         // Try zune-image first (fast path)
         match Self::from_path_as_zune(path) {
             Ok(img) => {
-                debug!("Loaded with zune-image: {:?}", path);
+                debug!("Loaded with zune-image: {path:?}");
                 Ok(img)
             }
             Err(_) => {
                 // Fall back to image crate for unsupported formats
-                debug!("Falling back to image crate for: {:?}", path);
+                debug!("Falling back to image crate for: {path:?}");
                 let img = image::ImageReader::open(path)?.decode()?;
                 Ok(Self::Image(img))
             }

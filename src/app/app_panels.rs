@@ -61,7 +61,7 @@ pub struct AppPanels {
 impl AppPanelsAndInputs {
     /// Create the appPanelsAndInputs which should be kept for the whole life of
     /// the application, starting with a single panel (it can't be empty), based on
-    /// the initial_root
+    /// the `initial_root`
     pub fn new(con: &AppContext) -> Result<Self, ProgramError> {
         let screen = Screen::new(con)?;
         let mut browser_state = Box::new(BrowserState::new(
@@ -729,10 +729,14 @@ impl AppPanelsAndInputs {
             queue!(w, MoveTo(cursor_pos.0, cursor_pos.1))?;
         }
 
-        kitty::manager()
-            .lock()
-            .unwrap()
-            .erase_images_before(w, self.drawing_count)?;
+        match kitty::manager().lock() {
+            Ok(mut manager) => {
+                manager.erase_images_before(w, self.drawing_count)?;
+            }
+            Err(e) => {
+                error!("failed to lock kitty manager to erase images: {e}");
+            }
+        }
         w.flush()?;
         Ok(())
     }
@@ -797,6 +801,6 @@ impl AppPanels {
         &self,
         panel_ref: PanelReference,
     ) -> Option<&dyn PanelState> {
-        self.by_ref(panel_ref).map(|panel| panel.state())
+        self.by_ref(panel_ref).map(Panel::state)
     }
 }

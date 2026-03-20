@@ -102,6 +102,8 @@ command = [
 	"-A", "clippy::unnecessary_debug_formatting",
 	"-A", "clippy::unreadable_literal",
 	"-A", "clippy::wildcard_imports",
+	"-A", "clippy::vec_init_then_push",
+	"-A", "clippy::single_match_else",
 ]
 need_stdout = false
 

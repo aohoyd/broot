@@ -23,7 +23,7 @@ pub struct DetailedImport {
 
 impl Import {
     pub fn applies(&self) -> bool {
-        self.luma().map_or(true, |luma| luma.is_verified())
+        self.luma().is_none_or(LumaCondition::is_verified)
     }
     pub fn luma(&self) -> Option<&LumaCondition> {
         match self {

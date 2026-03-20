@@ -35,7 +35,7 @@ impl Sequence {
     ) -> Self {
         Self {
             raw: raw.into(),
-            separator: separator.map_or_else(Sequence::local_separator, |s| s.into()),
+            separator: separator.map_or_else(Sequence::local_separator, Into::into),
         }
     }
     pub fn new_single<S: Into<String>>(cmd: S) -> Self {
@@ -108,12 +108,12 @@ fn add_commands(
             match con.verb_store.search_prefix(&invocation.name, None) {
                 PrefixSearchResult::NoMatch => {
                     return Err(ProgramError::UnknownVerb {
-                        name: invocation.name.to_string(),
+                        name: invocation.name.clone(),
                     });
                 }
                 PrefixSearchResult::Matches(_) => {
                     return Err(ProgramError::AmbiguousVerbName {
-                        name: invocation.name.to_string(),
+                        name: invocation.name.clone(),
                     });
                 }
                 PrefixSearchResult::Match(_, verb) => {

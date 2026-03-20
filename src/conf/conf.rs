@@ -9,16 +9,10 @@ use {
             ColsConf,
             LayoutInstructions,
         },
-        errors::{
-            ConfError,
-            ProgramError,
-        },
+        errors::*,
         kitty::KittyGraphicsDisplay,
         kitty::TransmissionMedium,
-        path::{
-            PathAnchor,
-            path_from,
-        },
+        path::*,
         preview::PreviewTransformerConf,
         skin::SkinEntry,
         syntactic::SyntaxTheme,
@@ -218,7 +212,7 @@ impl Conf {
         &self,
         path: &str,
     ) -> Option<PathBuf> {
-        if path.ends_with(".toml") || path.ends_with(".hjson") {
+        if path_has_ext(path, "toml") || path_has_ext(path, "hjson") {
             for conf_file in self.files.iter().rev() {
                 let solved = path_from(conf_file, PathAnchor::Parent, path);
                 if solved.exists() {
@@ -280,7 +274,7 @@ impl Conf {
         for import in &conf.imports {
             let file = import.file().trim();
             if !import.applies() {
-                debug!("skipping not applying conf file : {:?}", file);
+                debug!("skipping not applying conf file : {file:?}");
                 continue;
             }
             let import_path =
@@ -289,7 +283,7 @@ impl Conf {
                         path: file.to_string(),
                     })?;
             if self.files.contains(&import_path) {
-                debug!("skipping import already read: {:?}", import_path);
+                debug!("skipping import already read: {import_path:?}");
                 continue;
             }
             self.read_file(import_path)?;

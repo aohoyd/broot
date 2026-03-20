@@ -307,7 +307,7 @@ impl PanelInput {
                 let len = completions.len();
                 // self.tab_cycle_count is the next index to use, when going forward
                 if self.tab_cycle_count.is_none() {
-                    self.input_before_cycle = Some(raw.to_string());
+                    self.input_before_cycle = Some(raw.clone());
                 }
                 let idx = if backwards {
                     match self.tab_cycle_count {
@@ -328,7 +328,7 @@ impl PanelInput {
             let mut raw = self
                 .input_before_cycle
                 .as_ref()
-                .map_or(raw, |s| s.to_string());
+                .map_or(raw, ToString::to_string);
             raw.push_str(&added);
             self.input_field.set_str(&raw);
             Command::from_raw(raw, false)

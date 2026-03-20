@@ -120,7 +120,7 @@ verbs: [
     {
         key: alt-pageup
         internal: page_up
-        panel: right
+        impacted_panel: right
     }
 
 

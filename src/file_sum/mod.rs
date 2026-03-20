@@ -26,6 +26,7 @@ static SUM_CACHE: Lazy<Mutex<FxHashMap<PathBuf, FileSum>>> =
     Lazy::new(|| Mutex::new(FxHashMap::default()));
 
 pub fn clear_cache() {
+    #[allow(clippy::missing_panics_doc)] // panics if the mutex is poisoned (in which case it's better)
     SUM_CACHE.lock().unwrap().clear();
 }
 
@@ -75,6 +76,7 @@ impl FileSum {
         dam: &Dam,
         con: &AppContext,
     ) -> Option<Self> {
+        #[allow(clippy::missing_panics_doc)] // panics on mutex poisoning (good)
         let mut sum_cache = SUM_CACHE.lock().unwrap();
         match sum_cache.get(path) {
             Some(sum) => Some(*sum),

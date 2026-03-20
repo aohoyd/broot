@@ -71,13 +71,13 @@ pub enum Launchable {
 }
 
 /// If a part starts with a '$', replace it by the environment variable of the same name.
-/// This part is split too (because of https://github.com/Canop/broot/issues/114)
+/// This part is split too (because of <https://github.com/Canop/broot/issues/114>)
 fn resolve_env_variables(parts: Vec<String>) -> Vec<String> {
     let mut resolved = Vec::new();
-    for part in parts.into_iter() {
+    for part in parts {
         if let Some(var_name) = part.strip_prefix('$') {
             if let Ok(val) = env::var(var_name) {
-                resolved.extend(val.split(' ').map(|s| s.to_string()));
+                resolved.extend(val.split(' ').map(ToString::to_string));
                 continue;
             }
             if var_name == "EDITOR" {
@@ -175,13 +175,13 @@ impl Launchable {
                         if *keyboard_enhanced {
                             crokey::pop_keyboard_enhancement_flags()?;
                         }
-                        w.queue(cursor::Show).unwrap();
-                        w.queue(LeaveAlternateScreen).unwrap();
+                        w.queue(cursor::Show)?;
+                        w.queue(LeaveAlternateScreen)?;
                         if *capture_mouse {
-                            w.queue(DisableMouseCapture).unwrap();
+                            w.queue(DisableMouseCapture)?;
                         }
-                        terminal::disable_raw_mode().unwrap();
-                        w.flush().unwrap();
+                        terminal::disable_raw_mode()?;
+                        w.flush()?;
                     }
                 }
                 let mut old_working_dir = None;
@@ -202,13 +202,13 @@ impl Launchable {
                     });
                 if *switch_terminal {
                     if let Some(ref mut w) = &mut w {
-                        terminal::enable_raw_mode().unwrap();
+                        terminal::enable_raw_mode()?;
                         if *capture_mouse {
-                            w.queue(EnableMouseCapture).unwrap();
+                            w.queue(EnableMouseCapture)?;
                         }
-                        w.queue(EnterAlternateScreen).unwrap();
-                        w.queue(cursor::Hide).unwrap();
-                        w.flush().unwrap();
+                        w.queue(EnterAlternateScreen)?;
+                        w.queue(cursor::Hide)?;
+                        w.flush()?;
                         if *keyboard_enhanced {
                             crokey::push_keyboard_enhancement_flags()?;
                         }

@@ -1223,7 +1223,7 @@ pub trait PanelState {
             if let VerbExecution::External(external) = &verb.execution {
                 if external.exec_mode != ExternalExecutionMode::StayInBroot {
                     let coarity = external.exec_pattern.coarity();
-                    info!("coarity of the command is {:?}", coarity);
+                    info!("coarity of the command is {coarity:?}");
                     if coarity == CommandCoarity::PerSelection {
                         return Status::new(MULTI_SELECTION_ERROR.to_owned(), true);
                     }

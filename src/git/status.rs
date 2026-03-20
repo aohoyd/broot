@@ -45,7 +45,7 @@ pub struct LineStatusComputer {
     interesting_statuses: FxHashMap<PathBuf, Status>,
 }
 impl LineStatusComputer {
-    pub fn from(repo: Repository) -> Option<Self> {
+    pub fn from(repo: &Repository) -> Option<Self> {
         let workdir = repo.workdir()?;
         let mut interesting_statuses = FxHashMap::default();
         let statuses = repo.statuses(None).ok()?;
@@ -95,12 +95,12 @@ impl TreeGitStatus {
             Ok(diff) => match diff.stats() {
                 Ok(stats) => stats,
                 Err(e) => {
-                    debug!("get stats failed : {:?}", e);
+                    debug!("get stats failed : {e:?}");
                     return None;
                 }
             },
             Err(e) => {
-                debug!("get diff failed : {:?}", e);
+                debug!("get diff failed : {e:?}");
                 return None;
             }
         };

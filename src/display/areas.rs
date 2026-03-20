@@ -111,8 +111,8 @@ impl Areas {
         // adjust panel widths with layout instructions
         if nb_pos > 1 {
             for instruction in &layout_instructions.instructions {
-                debug!("Applying {:?}", instruction);
-                debug!("panel_widths before: {:?}", &panel_widths);
+                debug!("Applying {instruction:?}");
+                debug!("panel_widths before: {panel_widths:?}");
                 match *instruction {
                     LayoutInstruction::Clear => {} // not supposed to happen
                     LayoutInstruction::MoveDivider { divider, dx } => {

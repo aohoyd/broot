@@ -28,6 +28,9 @@ pub use {
 };
 
 /// return the instance of `ProjectDirs` holding broot's specific paths
+///
+/// # Panics
+/// if the configuration directories can't be found (sytem misconfiguration)
 #[must_use]
 pub fn app_dirs() -> directories::ProjectDirs {
     directories::ProjectDirs::from("org", "dystroy", "broot")

@@ -23,7 +23,7 @@ const UPPER_HALF_BLOCK: char = '▀';
 
 /// A "double line" normally contains two lines of pixels
 /// which are displayed as one line of characters, the
-/// UPPER_HALF_BLOCK foreground for the upper pixel and
+/// `UPPER_HALF_BLOCK` foreground for the upper pixel and
 /// the background of the char for the lower pixel.
 /// It acts as a buffer which is dumped to screen when
 /// full or when the image is totally read.

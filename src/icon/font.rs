@@ -132,11 +132,11 @@ impl IconPlugin for FontPlugin {
             TreeLineType::SymLink { .. } => "emoji_type_link", //bad but nothing better
             TreeLineType::File => self.handle_file(
                 &name.to_ascii_lowercase(),
-                double_ext.map(|de| de.to_ascii_lowercase()),
-                ext.map(|e| e.to_ascii_lowercase()),
+                double_ext.map(str::to_ascii_lowercase),
+                ext.map(str::to_ascii_lowercase),
             ),
             TreeLineType::Pruning => "file_type_kite", //irrelevant
-            _ => "default_file",
+            TreeLineType::BrokenSymLink(_) => "default_file",
         };
 
         let entry_icon = unsafe {

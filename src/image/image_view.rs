@@ -87,8 +87,7 @@ impl ImageView {
         area: &Area,
     ) -> Result<(), ProgramError> {
         let styles = &disc.panel_skin.styles;
-        let bg_color = styles.preview.get_bg()
-            .or_else(|| styles.default.get_bg());
+        let bg_color = styles.preview.get_bg().or_else(|| styles.default.get_bg());
         let bg = bg_color.unwrap_or(Color::Reset);
 
         // we avoid drawing when we were just displayed
@@ -100,7 +99,7 @@ impl ImageView {
         let must_draw = self
             .last_drawing
             .as_ref()
-            .map_or(true, |previous| !drawing_info.follows_in_place(previous));
+            .is_none_or(|previous| !drawing_info.follows_in_place(previous));
         if must_draw {
             debug!("image_view must be cleared");
         } else {
@@ -108,6 +107,7 @@ impl ImageView {
         }
         self.last_drawing = Some(drawing_info);
 
+        #[allow(clippy::missing_panics_doc)] // panics on mutex poisoning (good)
         let mut kitty_manager = kitty::manager().lock().unwrap();
 
         if !must_draw {
@@ -147,16 +147,18 @@ impl ImageView {
                     self.source_img
                         .fitting(target_width, target_height, bg_color),
                 )?;
-                self.display_img = Some(CachedImage {
-                    img,
-                    target_width,
-                    target_height,
-                });
-                &self.display_img.as_ref().unwrap().img
+                &self
+                    .display_img
+                    .insert(CachedImage {
+                        img,
+                        target_width,
+                        target_height,
+                    })
+                    .img
             }
         };
         let (width, height) = img.dimensions();
-        debug!("resized image dimensions: {},{}", width, height);
+        debug!("resized image dimensions: {width},{height}");
         debug_assert!(width <= area.width as u32);
         let mut double_line = DoubleLine::new(width as usize, disc.con.true_colors);
         let mut y = area.top;

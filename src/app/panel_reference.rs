@@ -47,7 +47,7 @@ impl fmt::Display for PanelReference {
             PanelReference::Leftest => write!(f, "leftest"),
             PanelReference::Rightest => write!(f, "rightest"),
             PanelReference::Id(id) => write!(f, "id:{}", id.as_usize()),
-            PanelReference::Idx(idx) => write!(f, "idx:{}", idx),
+            PanelReference::Idx(idx) => write!(f, "idx:{idx}"),
             PanelReference::Preview => write!(f, "preview"),
         }
     }

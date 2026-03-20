@@ -16,7 +16,7 @@ static DEFAULT_CONF_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/resources/defau
 /// Write the default configuration files in the destination directory, not
 /// overwriting existing ones
 pub fn write_default_conf_in(dir: &Path) -> Result<(), io::Error> {
-    info!("writing default conf in {:?}", dir);
+    info!("writing default conf in {dir:?}");
     if dir.exists() && !dir.is_dir() {
         return Err(io::Error::other(format!("{dir:?} isn't a directory")));
     }
@@ -25,7 +25,7 @@ pub fn write_default_conf_in(dir: &Path) -> Result<(), io::Error> {
     for file in files {
         let dest_path = dir.join(file.path());
         if dest_path.exists() {
-            warn!("not overwriting {:?}", dest_path);
+            warn!("not overwriting {dest_path:?}");
         } else {
             if let Some(dir) = dest_path.parent() {
                 if !dir.exists() {

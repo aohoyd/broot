@@ -103,7 +103,7 @@ impl<'a> SelInfo<'a> {
                 stype: SelectionType::from(path),
                 is_exe: false,
             }),
-            _ => None,
+            SelInfo::None => None,
         }
     }
     #[must_use]

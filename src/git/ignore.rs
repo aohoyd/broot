@@ -94,7 +94,7 @@ impl IgnoreRule {
                     if p.starts_with('/') {
                         format!("{}{}", ref_dir.to_string_lossy(), p)
                     } else {
-                        format!("**/{}", p)
+                        format!("**/{p}")
                     }
                 } else {
                     p.to_string()
@@ -136,7 +136,7 @@ impl IgnoreFile {
         local_git_ignore: bool,
     ) -> Result<IgnoreFile> {
         let f = File::open(file_path)?;
-        let git = file_path.file_name().map_or(false, |f| f == ".gitignore");
+        let git = file_path.file_name().is_some_and(|f| f == ".gitignore");
         let mut rules: Vec<IgnoreRule> = Vec::new();
         for line in BufReader::new(f).lines() {
             if let Some(rule) = IgnoreRule::from(&line?, ref_dir) {

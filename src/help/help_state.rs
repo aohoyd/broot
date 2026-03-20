@@ -252,7 +252,7 @@ impl PanelState for HelpState {
             }
             open_stay => match opener::open(Conf::default_location()) {
                 Ok(exit_status) => {
-                    info!("open returned with exit_status {:?}", exit_status);
+                    info!("open returned with exit_status {exit_status:?}");
                     CmdResult::Keep
                 }
                 Err(e) => CmdResult::DisplayError(format!("{e:?}")),
