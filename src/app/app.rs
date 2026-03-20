@@ -234,21 +234,18 @@ impl App {
                         new_active_panel_idx = Some((self.panels.active_panel_idx() + 1) % len);
                     }
                     Internal::panel_left_no_open => {
-                        // we're here because the state wants us to either move to the panel
-                        // to the left, or close the rightest one
+                        // move to the panel on the left, if any
                         new_active_panel_idx = if self.panels.active_panel_idx() == 0 {
-                            self.panels.close(self.panels.len() - 1, con);
-                            None
+                            None // already at leftmost — do nothing
                         } else {
                             Some(self.panels.active_panel_idx() - 1)
                         };
                     }
                     Internal::panel_right_no_open => {
-                        // we either move to the right or close the leftest panel
+                        // move to the panel on the right, if any
                         new_active_panel_idx =
                             if self.panels.active_panel_idx() + 1 == self.panels.len() {
-                                self.panels.close(0, con);
-                                None
+                                None // already at rightmost — do nothing
                             } else {
                                 Some(self.panels.active_panel_idx() + 1)
                             };
@@ -346,10 +343,11 @@ impl App {
                 state,
                 purpose,
                 direction,
+                activate,
             } => {
                 if let Err(s) =
                     self.panels
-                        .new_panel(state, purpose, direction, is_input_invocation, con)
+                        .new_panel(state, purpose, direction, activate || is_input_invocation, con)
                 {
                     error = Some(s);
                 }

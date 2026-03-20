@@ -36,6 +36,7 @@ pub fn on_path(
             PanelPurpose::None,
             con,
             HDir::Right,
+            false,
         )
     } else {
         new_state_on_path(path, screen, tree_options, con)
@@ -64,6 +65,7 @@ pub fn new_panel_on_path(
     purpose: PanelPurpose,
     con: &AppContext,
     direction: HDir,
+    activate: bool,
 ) -> CmdResult {
     #[cfg(not(windows))]
     // We try to canonicalize the path, mostly to resolve links
@@ -79,6 +81,7 @@ pub fn new_panel_on_path(
             state: Box::new(PreviewState::new(path, pattern, None, tree_options, con)),
             purpose,
             direction,
+            activate,
         }
     } else {
         let path = path::closest_dir(&path);
@@ -90,6 +93,7 @@ pub fn new_panel_on_path(
                 state: Box::new(os),
                 purpose,
                 direction,
+                activate,
             },
             Err(e) => CmdResult::DisplayError(e.to_string()),
         }
@@ -237,7 +241,7 @@ pub fn on_internal(
                     // be another medium, like a command sequence or with the server)
                     let arg_type = SelectionType::Any; // We might do better later
                     let purpose = PanelPurpose::ArgEdition { arg_type };
-                    new_panel_on_path(path, screen, tree_options, purpose, con, HDir::Right)
+                    new_panel_on_path(path, screen, tree_options, purpose, con, HDir::Right, false)
                 } else {
                     on_path(path, screen, tree_options, bang, con)
                 }

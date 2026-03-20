@@ -41,6 +41,7 @@ pub enum CmdResult {
         state: Box<dyn PanelState>,
         purpose: PanelPurpose,
         direction: HDir,
+        activate: bool,
     },
     NewState {
         state: Box<dyn PanelState>,
@@ -73,6 +74,7 @@ impl CmdResult {
                         state: Box::new(os),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::NewState {

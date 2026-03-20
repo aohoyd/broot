@@ -241,6 +241,7 @@ pub trait PanelState {
                                 state: Box::new(state),
                                 purpose: PanelPurpose::None,
                                 direction: HDir::Right,
+                                activate: false,
                             }
                         } else {
                             CmdResult::new_state(Box::new(state))
@@ -266,6 +267,7 @@ pub trait PanelState {
                                 state: Box::new(state),
                                 purpose: PanelPurpose::None,
                                 direction: HDir::Right,
+                                activate: false,
                             }
                         } else {
                             CmdResult::new_state(Box::new(state))
@@ -283,6 +285,7 @@ pub trait PanelState {
                         state: Box::new(HelpState::new(self.tree_options(), screen, con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::new_state(Box::new(HelpState::new(self.tree_options(), screen, con)))
@@ -677,6 +680,7 @@ pub trait PanelState {
                         state: Box::new(StageState::new(app_state, self.tree_options(), con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::Keep
@@ -694,6 +698,7 @@ pub trait PanelState {
                         state: Box::new(StageState::new(app_state, self.tree_options(), con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 }
             }
@@ -778,6 +783,7 @@ pub trait PanelState {
                     state: Box::new(StageState::new(app_state, self.tree_options(), con)),
                     purpose: PanelPurpose::None,
                     direction: HDir::Right,
+                    activate: false,
                 };
             }
         } else {
@@ -1045,6 +1051,7 @@ pub trait PanelState {
                 )),
                 purpose: PanelPurpose::Preview,
                 direction: HDir::Right,
+                activate: false,
             }
         } else {
             CmdResult::error("no selected file")

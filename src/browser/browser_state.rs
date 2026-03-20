@@ -443,6 +443,7 @@ impl PanelState for BrowserState {
                         PanelPurpose::None,
                         con,
                         HDir::Left,
+                        false,
                     )
                 } else {
                     // we let the app handle other cases
@@ -467,10 +468,11 @@ impl PanelState for BrowserState {
                         purpose,
                         con,
                         HDir::Right,
+                        true,
                     )
                 } else {
                     // we ask the app to handle other cases :
-                    // focus the panel to the right or close the leftest one
+                    // focus the panel to the right, if any
                     CmdResult::HandleInApp(Internal::panel_right_no_open)
                 }
             }
@@ -597,6 +599,7 @@ impl PanelState for BrowserState {
                         state: Box::new(StageState::new(app_state, stage_options, con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::Keep
@@ -615,6 +618,7 @@ impl PanelState for BrowserState {
                         state: Box::new(StageState::new(app_state, stage_options, con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::Keep
@@ -647,6 +651,7 @@ impl PanelState for BrowserState {
                             purpose,
                             con,
                             HDir::Right,
+                            false,
                         )
                     } else {
                         // we just open a new panel on the selected path,
@@ -658,6 +663,7 @@ impl PanelState for BrowserState {
                             PanelPurpose::None,
                             con,
                             HDir::Right,
+                            false,
                         )
                     }
                 }
