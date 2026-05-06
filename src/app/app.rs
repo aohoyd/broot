@@ -80,6 +80,7 @@ impl App {
             let preview_state = Box::new(PreviewState::new(
                 path.clone(),
                 InputPattern::none(),
+                0,
                 None,
                 con.initial_tree_options.clone(),
                 con,
@@ -121,7 +122,6 @@ impl App {
         let cmd_result = self
             .panels
             .apply_command(w, cmd, None, panel_skin, app_state, con)?;
-        debug!("cmd_result: {:?}", &cmd_result);
         let mut error: Option<String> = None;
         let mut new_active_panel_idx = None;
         match cmd_result {
@@ -151,14 +151,7 @@ impl App {
                     self.panels.clear_input_invocation(con);
                 }
                 let close_idx = self.panels.idx_by_ref(panel_ref)
-                    .unwrap_or_else(||
-                        // when there's a preview panel, we close it rather than the app
-                        if self.panels.len()==2 && self.panels.has_preview_panel() {
-                            1
-                        } else {
-                            self.panels.active_panel_idx()
-                        }
-                    );
+                    .unwrap_or_else(|| self.panels.active_panel_idx());
                 let mut new_arg = None;
                 if validate_purpose {
                     let purpose = &self.panels.panel_by_idx_unchecked(close_idx).purpose;

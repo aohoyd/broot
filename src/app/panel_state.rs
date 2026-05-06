@@ -15,6 +15,7 @@ use {
         verb::*,
     },
     std::{
+        fs,
         path::{
             Path,
             PathBuf,
@@ -660,6 +661,78 @@ pub trait PanelState {
                     CmdResult::Keep
                 }
             }
+            Internal::copy_from_staging | Internal::move_from_staging => {
+                let is_move = internal_exec.internal == Internal::move_from_staging;
+                if app_state.stage.is_empty() {
+                    CmdResult::error("Staging area is empty")
+                } else if let Some(selected) = self.selected_path() {
+                    let dest_dir = if selected.is_dir() {
+                        selected.to_path_buf()
+                    } else {
+                        selected
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| PathBuf::from("/"))
+                    };
+                    let paths: Vec<PathBuf> = app_state.stage.paths().to_vec();
+                    let total = paths.len();
+                    let mut ok_count = 0usize;
+                    let mut err_count = 0usize;
+                    for src in &paths {
+                        let file_name = match src.file_name() {
+                            Some(n) => n,
+                            None => {
+                                err_count += 1;
+                                continue;
+                            }
+                        };
+                        let dst = dest_dir.join(file_name);
+                        if src.parent() == Some(&dest_dir) {
+                            // source is already in the destination directory
+                            ok_count += 1;
+                            continue;
+                        }
+                        let result = if is_move {
+                            fs::rename(src, &dst).or_else(|_| {
+                                // cross-device move: copy then remove
+                                copy_dir_recursively(src, &dst).and_then(|_| {
+                                    if src.is_dir() {
+                                        fs::remove_dir_all(src)
+                                    } else {
+                                        fs::remove_file(src)
+                                    }
+                                })
+                            })
+                        } else if src.is_dir() {
+                            copy_dir_recursively(src, &dst)
+                        } else {
+                            fs::copy(src, &dst).map(|_| ())
+                        };
+                        match result {
+                            Ok(()) => ok_count += 1,
+                            Err(e) => {
+                                warn!("failed to {} {:?}: {}", if is_move { "move" } else { "copy" }, src, e);
+                                err_count += 1;
+                            }
+                        }
+                    }
+                    let op = if is_move { "moved" } else { "copied" };
+                    if err_count == 0 {
+                        CmdResult::RefreshState { clear_cache: true }
+                    } else if ok_count == 0 {
+                        CmdResult::DisplayError(format!(
+                            "Failed to {op_verb} all {total} file(s)",
+                            op_verb = if is_move { "move" } else { "copy" },
+                        ))
+                    } else {
+                        CmdResult::DisplayError(format!(
+                            "{op} {ok_count}/{total} file(s) ({err_count} failed)"
+                        ))
+                    }
+                } else {
+                    CmdResult::error("No selected path for destination")
+                }
+            }
             Internal::stage => self.stage(app_state, cc, con),
             Internal::unstage => self.unstage(app_state, cc, con),
             Internal::toggle_stage => self.toggle_stage(app_state, cc, con),
@@ -1041,10 +1114,12 @@ pub trait PanelState {
                 CmdResult::Keep
             }
         } else if let Some(path) = self.selected_path() {
+            let line = self.selection().map_or(0, |s| s.line);
             CmdResult::NewPanel {
                 state: Box::new(PreviewState::new(
                     path.to_path_buf(),
                     InputPattern::none(),
+                    line,
                     preferred_mode,
                     self.tree_options(),
                     cc.app.con,
@@ -1143,6 +1218,7 @@ pub trait PanelState {
     fn set_selected_path(
         &mut self,
         _path: PathBuf,
+        _line: LineNumber,
         _con: &AppContext,
     ) {
         // this function is useful for preview states
@@ -1257,4 +1333,19 @@ pub fn get_arg<T: Copy + FromStr>(
         .or(internal_exec.arg.as_ref())
         .and_then(|s| s.parse::<T>().ok())
         .unwrap_or(default)
+}
+
+fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursively(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }

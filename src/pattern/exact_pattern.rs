@@ -114,7 +114,7 @@ impl ExactPattern {
             if line.contains(&self.pattern) {
                 return Ok(Some(line_count));
             }
-            line_count = 1;
+            line_count += 1;
         }
         Ok(None)
     }

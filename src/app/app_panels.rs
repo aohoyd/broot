@@ -79,7 +79,7 @@ impl AppPanelsAndInputs {
         let panel = Panel::new(PanelId::from(0), browser_state, areas, con);
         debug!("initial panel areas: {:?}", panel.areas);
         Ok(Self {
-            created_panels_count: 0,
+            created_panels_count: 1,
             panels: AppPanels {
                 screen,
                 active_panel_idx: 0,
@@ -344,8 +344,9 @@ impl AppPanelsAndInputs {
         if len == 2 {
             let non_removed_idx = if panel_idx == 0 { 1 } else { 0 };
             let non_removed_panel = &self.panels.panels[non_removed_idx];
-            if non_removed_panel.state().get_type() == PanelStateType::Preview
-                || non_removed_panel.state().get_type() == PanelStateType::Stage
+            let remaining_type = non_removed_panel.state().get_type();
+            if remaining_type == PanelStateType::Preview
+                || remaining_type == PanelStateType::Stage
             {
                 return false; // we don't want to stay with just the preview or stage
             }
@@ -603,10 +604,11 @@ impl AppPanelsAndInputs {
         if let Some(path) = self.state().selected_path() {
             let old_path = self.panels.panels[preview_idx].state().selected_path();
             if refresh || Some(path) != old_path {
+                let line = self.state().selection().map_or(0, |s| s.line);
                 let path = path.to_path_buf();
                 self.panels.panels[preview_idx]
                     .mut_state()
-                    .set_selected_path(path, con);
+                    .set_selected_path(path, line, con);
             }
         }
     }

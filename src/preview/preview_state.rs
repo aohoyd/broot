@@ -55,6 +55,7 @@ impl PreviewState {
     pub fn new(
         source_path: PathBuf,
         pending_pattern: InputPattern,
+        line: LineNumber,
         preferred_mode: Option<PreviewMode>,
         tree_options: TreeOptions,
         con: &AppContext,
@@ -67,7 +68,10 @@ impl PreviewState {
             .as_ref()
             .map(|c| &c.output_path)
             .unwrap_or(&source_path);
-        let preview = Preview::new(preview_path, preferred_mode, con);
+        let mut preview = Preview::new(preview_path, preferred_mode, con);
+        if line > 0 {
+            preview.try_select_line_number(line);
+        }
         PreviewState {
             preview_area,
             dirty: true,
@@ -226,10 +230,16 @@ impl PanelState for PreviewState {
     fn set_selected_path(
         &mut self,
         path: PathBuf,
+        line: LineNumber,
         con: &AppContext,
     ) {
-        let selected_line_number = if self.preview_path() == path {
-            self.preview.get_selected_line_number()
+        let selected_line_number = if line > 0 {
+            Some(line)
+        } else if self.source_path == path {
+            self.filtered_preview
+                .as_ref()
+                .and_then(|p| p.get_selected_line_number())
+                .or_else(|| self.preview.get_selected_line_number())
         } else {
             None
         };
@@ -272,7 +282,7 @@ impl PanelState for PreviewState {
         con: &AppContext,
     ) -> Command {
         self.dirty = true;
-        self.set_selected_path(self.source_path.clone(), con);
+        self.set_selected_path(self.source_path.clone(), 0, con);
         Command::empty()
     }
 

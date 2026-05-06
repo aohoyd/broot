@@ -300,6 +300,8 @@ impl VerbStore {
         self.add_internal(select);
         self.add_internal(show);
         self.add_internal(clear_stage).with_shortcut("cls");
+        self.add_internal(copy_from_staging).with_shortcut("cfs");
+        self.add_internal(move_from_staging).with_shortcut("mfs");
         self.add_internal(stage).with_key(key!('+'));
         self.add_internal(unstage).with_key(key!('-'));
         self.add_internal(stage_all_directories);
