@@ -104,6 +104,7 @@ command = [
 	"-A", "clippy::wildcard_imports",
 	"-A", "clippy::vec_init_then_push",
 	"-A", "clippy::single_match_else",
+	"-A", "clippy::return_self_not_must_use",
 ]
 need_stdout = false
 

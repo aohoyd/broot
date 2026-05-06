@@ -15,7 +15,7 @@ pub struct CompositePattern {
 
 impl CompositePattern {
     pub fn new(expr: BeTree<PatternOperator, Pattern>) -> Self {
-        let content_search = expr.iter_atoms().any(|p| p.is_content_search());
+        let content_search = expr.iter_atoms().any(Pattern::is_content_search);
         Self {
             expr,
             content_search,
@@ -160,7 +160,7 @@ impl CompositePattern {
                     // We can't generate a content match for a whole file
                     // content, so we build one of length 0.
                     Some(ContentMatch {
-                        extract: "".to_string(),
+                        extract: String::new(),
                         needle_start: 0,
                         needle_end: 0,
                     })
@@ -274,7 +274,7 @@ impl CompositePattern {
     }
 
     pub fn is_empty(&self) -> bool {
-        let is_not_empty = self.expr.iter_atoms().any(|p| p.is_some());
+        let is_not_empty = self.expr.iter_atoms().any(Pattern::is_some);
         !is_not_empty
     }
 }

@@ -213,10 +213,14 @@ impl Tree {
         cycle: bool,
     ) {
         let l = self.lines.len();
+        if l == 0 {
+            return;
+        }
         // we find the new line to select
         loop {
             if dy < 0 {
                 let ady = (-dy) as usize;
+                let ady = ady % l;
                 if !cycle && self.selection < ady {
                     break;
                 }

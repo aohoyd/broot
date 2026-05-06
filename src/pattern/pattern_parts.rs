@@ -78,7 +78,7 @@ impl PatternParts {
     }
     pub fn flags(&self) -> Option<&str> {
         if self.parts.len() > 2 {
-            self.parts.get(2).map(|s| s.as_str())
+            self.parts.get(2).map(String::as_str)
         } else {
             None
         }

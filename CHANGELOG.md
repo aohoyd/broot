@@ -1,3 +1,12 @@
+### next
+- fix control characters sometimes remaining in the terminal after broot exit
+- nushell: rename br module to avoid conflict in last nushell version - Fix #1138 - Thanks @paulhey
+
+### v1.56.2 - 2026-03-26
+<a name="v1.56.2"></a>
+- `{file-root-relative}` argument - Fix #1142
+- fix `:clear_stage` (or other operations closing the stage panel) often closing broot - Fix #1143
+
 ### v1.56.1 - 2026-03-20
 <a name="v1.56.1"></a>
 - fix a typo in a verb in default conf

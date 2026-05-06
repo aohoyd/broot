@@ -103,7 +103,7 @@ impl ExactPattern {
     }
 
     /// get the line of the first match, if any
-    /// (not used today, we use content_pattern to search in files)
+    /// (not used today, we use `content_pattern` to search in files)
     pub fn try_get_match_line_count(
         &self,
         path: &Path,
@@ -120,7 +120,7 @@ impl ExactPattern {
     }
 
     /// get the line of the first match, if any
-    /// (not used today, we use content_pattern to search in files)
+    /// (not used today, we use `content_pattern` to search in files)
     pub fn get_match_line_count(
         &self,
         path: &Path,

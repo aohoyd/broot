@@ -3,18 +3,12 @@ use {
     crate::{
         app::*,
         command::*,
-        path::{
-            self,
-            PathAnchor,
-        },
+        path::{self, PathAnchor},
         stage::Stage,
     },
     regex::Captures,
     rustc_hash::FxHashMap,
-    std::path::{
-        Path,
-        PathBuf,
-    },
+    std::path::{Path, PathBuf},
 };
 
 /// a temporary structure gathering selection and invocation
@@ -225,6 +219,13 @@ impl<'b> ExecutionBuilder<'b> {
                     .map(|p| self.path_to_string(p))
                     .collect();
                 Some(paths.join(" "))
+            }
+            "file-root-relative" => {
+                // file path relative to the tree root
+                sel?.path
+                    .strip_prefix(self.root)
+                    .ok()
+                    .map(|p| self.path_to_string(p))
             }
             #[cfg(unix)]
             "server-name" => con.server_name.clone(),

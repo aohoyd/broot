@@ -27,7 +27,7 @@ pub enum SearchKind {
     Tokens,
 }
 
-/// a valid combination of SearchObject and SearchKind,
+/// a valid combination of `SearchObject` and `SearchKind`,
 /// determine how a pattern will be used
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SearchMode {
@@ -90,7 +90,7 @@ impl SearchMode {
     ) -> String {
         con.search_modes
             .key(self)
-            .map_or_else(|| "".to_string(), |k| format!("{k}/"))
+            .map_or_else(String::new, |k| format!("{k}/"))
     }
     pub fn object(self) -> SearchObject {
         match self {
@@ -120,7 +120,7 @@ impl SearchMode {
 }
 
 /// define a mapping from a search mode which can be typed in
-/// the input to a SearchMode value
+/// the input to a `SearchMode` value
 #[derive(Debug, Clone)]
 pub struct SearchModeMapEntry {
     pub key: Option<String>,
@@ -184,13 +184,10 @@ impl SearchModeMapEntry {
             });
         }
 
-        let mode = match SearchMode::new(search_objects[0], search_kinds[0]) {
-            Some(mode) => mode,
-            None => {
-                return Err(ConfError::InvalidSearchMode {
-                    details: "Unsupported combination of search object and kind".to_string(),
-                });
-            }
+        let Some(mode) = SearchMode::new(search_objects[0], search_kinds[0]) else {
+            return Err(ConfError::InvalidSearchMode {
+                details: "Unsupported combination of search object and kind".to_string(),
+            });
         };
 
         let key = if conf_key.is_empty() || conf_key == "<empty>" {
@@ -278,7 +275,7 @@ impl SearchModeMap {
             mode: if let Some(key) = key {
                 format!("{key}/")
             } else {
-                "".to_string()
+                String::new()
             },
         })
     }
@@ -291,7 +288,7 @@ impl SearchModeMap {
                 return entry.key.as_ref();
             }
         }
-        warn!("search mode key not found for {:?}", search_mode); // should not happen
+        warn!("search mode key not found for {search_mode:?}"); // should not happen
         None
     }
 }

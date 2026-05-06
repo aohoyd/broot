@@ -3,7 +3,7 @@ use {
     smallvec::SmallVec,
 };
 
-/// A NameMatch is a positive result of pattern matching inside
+/// A `NameMatch` is a positive result of pattern matching inside
 /// a filename or subpath
 #[derive(Debug, Clone)]
 pub struct NameMatch {
@@ -44,7 +44,7 @@ impl NameMatch {
             pos: merged,
         }
     }
-    /// wraps any group of matching characters with match_start and match_end
+    /// wraps any group of matching characters with `match_start` and `match_end`
     pub fn wrap(
         &self,
         name: &str,

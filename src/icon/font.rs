@@ -81,11 +81,11 @@ impl FontPlugin {
 
     fn handle_single_extension(
         &self,
-        ext: Option<String>,
+        ext: Option<&str>,
     ) -> &'static str {
         match ext {
             None => "default_file",
-            Some(ref e) => match self.extension_to_icon_name_map.get(e as &str) {
+            Some(e) => match self.extension_to_icon_name_map.get(e as &str) {
                 None => "default_file",
                 Some(icon_name) => icon_name,
             },
@@ -100,18 +100,18 @@ impl FontPlugin {
     ) -> &'static str {
         match self.file_name_to_icon_name_map.get(name) {
             Some(icon_name) => icon_name,
-            _ => self.handle_double_extension(double_ext, ext),
+            _ => self.handle_double_extension(double_ext.as_deref(), ext.as_deref()),
         }
     }
 
     fn handle_double_extension(
         &self,
-        double_ext: Option<String>,
-        ext: Option<String>,
+        double_ext: Option<&str>,
+        ext: Option<&str>,
     ) -> &'static str {
         match double_ext {
             None => self.handle_single_extension(ext),
-            Some(ref de) => match self.double_extension_to_icon_name_map.get(de as &str) {
+            Some(de) => match self.double_extension_to_icon_name_map.get(de as &str) {
                 None => self.handle_single_extension(ext),
                 Some(icon_name) => icon_name,
             },

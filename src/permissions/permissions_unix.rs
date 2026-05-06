@@ -18,7 +18,7 @@ pub fn user_name(uid: u32) -> String {
             |u| u.name().to_string_lossy().to_string(),
         )
     });
-    (*name).to_string()
+    (*name).clone()
 }
 
 pub fn group_name(gid: u32) -> String {
@@ -31,5 +31,5 @@ pub fn group_name(gid: u32) -> String {
             |u| u.name().to_string_lossy().to_string(),
         )
     });
-    (*name).to_string()
+    (*name).clone()
 }

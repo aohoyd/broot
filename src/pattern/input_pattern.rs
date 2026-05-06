@@ -57,7 +57,7 @@ impl InputPattern {
         self.pattern.is_some()
     }
     /// empties the pattern and return it
-    /// Similar to Option::take
+    /// Similar to `Option::take`
     pub fn take(&mut self) -> Self {
         std::mem::replace(self, Self::none())
     }

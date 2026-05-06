@@ -132,7 +132,7 @@ impl HexView {
         const MIN: i32 = 1    // margin
             + 32 // 32 hex
             + 1; // scrollbar
-        let mut rem = area.width as i32 - MIN;
+        let mut rem = i32::from(area.width) - MIN;
         if rem > 17 {
             chars = true;
             rem -= 17;

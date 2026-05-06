@@ -41,7 +41,7 @@ impl ContentExactPattern {
     }
 
     pub fn to_regex_parts(&self) -> (String, String) {
-        (regex::escape(self.as_str()), "".to_string())
+        (regex::escape(self.as_str()), String::new())
     }
 
     pub fn score_of(
