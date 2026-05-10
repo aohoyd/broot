@@ -258,6 +258,71 @@ syntax_theme = "OceanLight"
 Those themes come from [syntect](https://github.com/trishume/syntect) and are bundled in broot.
 
 
+# Bookmarks / Goto modal
+
+Press <kbd>g</kbd> in the tree to open the *Goto* modal — a small,
+bottom-anchored popup listing your bookmarks. Each bookmark is a
+single-character key bound to a filesystem (or trash) path. Pressing
+the bound key from inside the modal closes it and focuses that path.
+You can also navigate with arrow keys (or <kbd>tab</kbd> /
+<kbd>shift-tab</kbd>) and commit with <kbd>enter</kbd>; <kbd>esc</kbd>
+or <kbd>ctrl-c</kbd> dismisses without acting.
+
+The bookmark list is configured under the `bookmarks` key in
+`conf.hjson` (or `conf.toml`):
+
+```hjson
+bookmarks: [
+    { key: 'h', path: '~' }
+    { key: 'd', path: '~/Downloads' }
+    { key: 'c', path: '${XDG_CONFIG_HOME}' }
+    { key: 't', path: 'trash://' }
+]
+```
+```toml
+[[bookmarks]]
+key = "h"
+path = "~"
+
+[[bookmarks]]
+key = "d"
+path = "~/Downloads"
+
+[[bookmarks]]
+key = "c"
+path = "${XDG_CONFIG_HOME}"
+
+[[bookmarks]]
+key = "t"
+path = "trash://"
+```
+
+**Path expansion.** The following placeholders are expanded once,
+when broot starts:
+
+- `~` and `~/...` → the user home directory
+- `${HOME}` / `${HOME}/...` → same as above (also reads the `HOME` env var as a fallback)
+- `${XDG_CONFIG_HOME}` → that env var if set, otherwise `~/.config`
+- `trash://` → the platform trash directory (Linux: `~/.local/share/Trash`, macOS: `~/.Trash`, Windows: not supported — the bookmark is dropped with a warning)
+
+Anything else is treated as a literal path. Existence is **not**
+checked — if the resolved path doesn't exist, broot will surface its
+standard "not found" error when you commit.
+
+**Defaults.** Omit the `bookmarks` block entirely to use the four
+built-in defaults (`h`, `d`, `c`, `t` mapped as in the example
+above). Define `bookmarks: []` (an explicit empty list) to disable
+the defaults without supplying replacements. Custom lists fully
+replace the defaults — they do not merge.
+
+**Duplicate keys.** If two entries share the same key, broot keeps
+the first occurrence and logs a warning for the rest. Ordering is
+load-bearing.
+
+**Modal scope.** The bookmark keys only fire while the Goto modal is
+open. They do not collide with global tree-mode bindings — typing
+`h` from the tree still triggers `:parent`.
+
 # Terminal title
 
 If you set the `terminal_title` parameter, broot will change the title of the terminal when the current tree root changes.

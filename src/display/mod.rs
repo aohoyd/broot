@@ -26,6 +26,7 @@ mod cell_size;
 mod col;
 mod displayable_tree;
 pub mod flags_display;
+pub mod frame;
 mod git_status_display;
 mod layout_instructions;
 mod luma;

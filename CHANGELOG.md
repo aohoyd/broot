@@ -1,6 +1,12 @@
 ### next
 - fix control characters sometimes remaining in the terminal after broot exit
 - nushell: rename br module to avoid conflict in last nushell version - Fix #1138 - Thanks @paulhey
+- elio-style rounded panel frames with the panel's tree-root path embedded in the top edge
+- Nerd Font icons are now on by default; disable with `icon_theme: none`
+- floating overlay layer hosting the new confirmation modals and Goto/Bookmarks modal
+- destructive verbs prompt before running: built-in `:rm` and `:trash` always confirm; `:cp`/`:mv` confirm when the destination already exists; bulk staging operations confirm the fan-out count
+- `confirm: true|false` field on verbs (parallel to `auto_exec`) lets users opt their own externals into the prompt or opt the built-ins out
+- new `:goto_bookmarks` internal verb (default key `g`) opens a single-character jump menu populated from a new `bookmarks` config section; built-in defaults: `h` (home), `d` (~/Downloads), `c` (${XDG_CONFIG_HOME} or ~/.config), `t` (trash)
 
 ### v1.56.2 - 2026-03-26
 <a name="v1.56.2"></a>

@@ -159,6 +159,12 @@ pub struct AppContext {
     /// layout modifiers, like divider moves
     pub layout_instructions: LayoutInstructions,
 
+    /// Resolved single-character bookmarks for the Goto modal.
+    ///
+    /// Built at AppContext load time from `Conf::bookmarks` (or
+    /// the built-in defaults if the user didn't declare any).
+    pub bookmarks: Vec<BookmarkEntry>,
+
     /// server name
     pub server_name: Option<String>,
 }
@@ -182,7 +188,10 @@ impl AppContext {
         } else {
             are_true_colors_available()
         };
-        let icons = config.icon_theme.as_ref().and_then(|itn| icon_plugin(itn));
+        // Icons are on by default. Users can opt out by setting
+        // `icon_theme: none` in their config.
+        let theme = config.icon_theme.as_deref().unwrap_or("nerdfont");
+        let icons = icon_plugin(theme);
         let mut special_paths: SpecialPaths = (&config.special_paths).try_into()?;
         special_paths.add_defaults();
         let search_modes = config
@@ -240,6 +249,8 @@ impl AppContext {
         let server_name = build_server_name(&launch_args)
             .or_else(|| build_server_name(config_default_args.as_ref()?));
 
+        let bookmarks = build_bookmarks(config.bookmarks.as_deref());
+
         Ok(Self {
             is_tty,
             initial_root,
@@ -277,6 +288,7 @@ impl AppContext {
             lines_before_match_in_preview: config.lines_before_match_in_preview.unwrap_or(0),
             preview_transformers,
             layout_instructions,
+            bookmarks,
             server_name,
         })
     }
@@ -393,4 +405,51 @@ fn build_server_name(args: &Args) -> Option<String> {
         return Some(crate::net::random_server_name());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an `AppContext` from a `Conf` whose only customisation is the
+    /// `icon_theme` field. Mirrors the `Default` impl above but lets us
+    /// inspect resolution behaviour for that single setting.
+    fn context_with_icon_theme(icon_theme: Option<&str>) -> AppContext {
+        let mut config = Conf::default();
+        config.icon_theme = icon_theme.map(str::to_string);
+        let verb_store = VerbStore::new(&mut config).unwrap();
+        let launch_args = parse_default_flags("").unwrap();
+        AppContext::from(launch_args, verb_store, &config).unwrap()
+    }
+
+    #[test]
+    fn missing_icon_theme_defaults_to_nerdfont() {
+        // No `icon_theme` set → icons are on by default (the new policy).
+        let ctx = context_with_icon_theme(None);
+        assert!(
+            ctx.icons.is_some(),
+            "icons should be enabled when icon_theme is unset",
+        );
+    }
+
+    #[test]
+    fn explicit_nerdfont_still_works() {
+        let ctx = context_with_icon_theme(Some("nerdfont"));
+        assert!(ctx.icons.is_some());
+    }
+
+    #[test]
+    fn explicit_vscode_still_works() {
+        let ctx = context_with_icon_theme(Some("vscode"));
+        assert!(ctx.icons.is_some());
+    }
+
+    #[test]
+    fn explicit_none_disables_icons() {
+        let ctx = context_with_icon_theme(Some("none"));
+        assert!(
+            ctx.icons.is_none(),
+            "icon_theme: none should yield no icon plugin",
+        );
+    }
 }

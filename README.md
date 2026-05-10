@@ -102,6 +102,59 @@ Here's chmod:
 
 ![chmod](website/src/img/20230930-chmod.png)
 
+Destructive verbs (`:rm`, `:trash`) now prompt for confirmation before
+running. `:cp` and `:mv` prompt when the destination already exists,
+and bulk operations on the [staging area](staging-area) confirm the
+fan-out count before fanning out.
+
+You can opt your own external verbs into this prompt with
+`confirm: true` in `conf.hjson`, or opt the built-ins out with
+`confirm: false`. The `confirm` field sits next to `auto_exec` in the
+verb block (see [Verb definition attributes](#verb-definition-attributes)
+on the docs site).
+
+## Goto bookmarks
+
+Press <kbd>g</kbd> from the tree to open the bookmarks goto modal.
+Each entry is a single-character shortcut bound to a path; hit the
+key and broot jumps there. The built-in defaults are `h` (home),
+`d` (`~/Downloads`), `c` (`$XDG_CONFIG_HOME` or `~/.config`), and
+`t` (trash).
+
+The bookmark keys are scoped *inside* the modal. They do not collide
+with global tree-mode keys: typing `g` while the modal is open does
+nothing, and a single-char jump (e.g. `h` while the modal is open
+focuses Home, but `h` from the tree still triggers `:parent`).
+
+Inside the *tree*, `g` is the trigger key for `:goto_bookmarks`.
+Because `g` is also a regular fuzzy-match character, broot installs
+this binding on the **internal verb** `:goto_bookmarks`, not on the
+input row — so typing `g` as part of a search filter while the input
+has focus still works. If you want to free `g` for a different
+shortcut, add an unbinding in your `conf.hjson`:
+
+```hjson
+{ key: g, internal: ":goto_bookmarks", invocation: false }
+```
+
+Customize the bookmark list with a `bookmarks` block in `conf.hjson`
+— see the commented example near the top of the default config.
+
+### Icons — breaking change in this release
+
+Nerd Font icons are **on by default**. Earlier broot versions
+shipped with no icons; users upgrading from those versions will see
+unfamiliar glyph columns. If your terminal does not have a Nerd Font
+installed, set `icon_theme: none` in `conf.hjson` to restore the
+previous behaviour. See [icons.md](website/src/icons.md) for
+installation guidance.
+
+## Icons
+
+Nerd Font icons are on by default. Set `icon_theme: none` in
+`conf.hjson` to turn them off, or `icon_theme: vscode` for the VSCode
+glyphs.
+
 ## Manage files with panels
 
 When a directory is selected, do <kbd>ctrl</kbd><kbd>→</kbd> and you open another panel (you may open other ones, or navigate between them, with <kbd>ctrl</kbd><kbd>←</kbd> and <kbd>ctrl</kbd><kbd>→</kbd>).

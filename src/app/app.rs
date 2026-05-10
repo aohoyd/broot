@@ -70,6 +70,17 @@ pub struct App {
 
     /// a watcher for notify events
     watcher: Watcher,
+
+    /// floating overlay layer (confirm modal, goto modal, etc.).
+    /// When `Some`, the overlay captures all key/mouse events and is
+    /// rendered on top of every panel. Wired up by Tasks 7 and 12.
+    overlay: Option<Overlay>,
+
+    /// One-shot flag: when `true`, the next call to `apply_command`
+    /// skips its `requires_confirm` / `Internal::trash` intercept,
+    /// allowing the post-confirmation re-dispatch to actually run the
+    /// destructive action. Reset to `false` after each consult.
+    skip_confirm: bool,
 }
 
 impl App {
@@ -105,7 +116,30 @@ impl App {
             tx_seqs,
             rx_seqs,
             watcher,
+            overlay: None,
+            skip_confirm: false,
         })
+    }
+
+    /// Install a `ConfirmOverlay` on top of the current panels. The
+    /// `pending` command will be re-dispatched if (and only if) the
+    /// user confirms. The re-dispatch uses the `skip_confirm` flag so
+    /// `apply_command` does not loop back into the overlay.
+    pub(crate) fn request_confirm(
+        &mut self,
+        title: impl Into<String>,
+        body: Vec<String>,
+        confirm_label: impl Into<String>,
+        danger: bool,
+        pending: Command,
+    ) {
+        self.overlay = Some(Overlay::Confirm(ConfirmOverlay::new(
+            title,
+            body,
+            confirm_label,
+            danger,
+            pending,
+        )));
     }
 
     /// apply a command. Change the states but don't redraw on screen.
@@ -119,6 +153,43 @@ impl App {
     ) -> Result<(), ProgramError> {
         info!("app applying command: {:?}", &cmd);
         let is_input_invocation = cmd.is_verb_invocated_from_input();
+
+        // Confirmation intercept. Three branches, evaluated in
+        // precedence order — the first match opens an overlay and
+        // returns, so at most one overlay fires per dispatch:
+        //
+        //   1. Bulk staging — a verb is being run while the stage
+        //      panel is active and contains more than one path.
+        //   2. Overwrite check — `:cp`/`:mv` family resolves to an
+        //      existing destination.
+        //   3. Destructive verb — `:rm`, `:trash`, or any verb with
+        //      `requires_confirm == true`.
+        //
+        // The `skip_confirm` flag suppresses all three on the
+        // post-confirmation re-entry; an already-open overlay also
+        // bypasses them (the overlay handler manages re-dispatch).
+        if !self.skip_confirm && self.overlay.is_none() {
+            if let Some((title, body, confirm_label, danger)) =
+                self.maybe_bulk_stage_confirm(cmd, app_state, con)
+            {
+                self.request_confirm(title, body, confirm_label, danger, cmd.clone());
+                if is_input_invocation {
+                    self.panels.clear_input_invocation(con);
+                }
+                return Ok(());
+            }
+            if let Some((title, body, confirm_label)) =
+                self.maybe_destructive_confirm(cmd, app_state, con)
+            {
+                self.request_confirm(title, body, confirm_label, true, cmd.clone());
+                if is_input_invocation {
+                    self.panels.clear_input_invocation(con);
+                }
+                return Ok(());
+            }
+        }
+        self.skip_confirm = false;
+
         let cmd_result = self
             .panels
             .apply_command(w, cmd, None, panel_skin, app_state, con)?;
@@ -393,6 +464,12 @@ impl App {
                 app_state.stage.refresh();
                 self.panels.refresh_all_panels(con);
             }
+            CmdResult::OpenOverlay(overlay) => {
+                if is_input_invocation {
+                    self.panels.clear_input_invocation(con);
+                }
+                self.overlay = Some(*overlay);
+            }
         }
         if let Some(text) = error {
             self.panels.mut_panel().set_error(text);
@@ -425,6 +502,204 @@ impl App {
 
         self.panels.update_preview(false, con);
 
+        Ok(())
+    }
+
+    /// Inspect a command and, if it would trigger a destructive verb
+    /// or `Internal::trash`, return the `(title, body, confirm_label)`
+    /// for the confirmation overlay. Returns `None` for any command
+    /// that should run as-is.
+    ///
+    /// Resolution rules mirror `Panel::apply_command`'s dispatch:
+    /// - `Command::VerbInvocate` — look up by name in `verb_store`.
+    /// - `Command::VerbTrigger` — look up by `verb_id`.
+    /// - `Command::Internal { internal: trash, .. }` — hard-coded.
+    ///
+    /// The cp/mv-family verbs (`:cp`, `:mv`, `:cpp`/`copy_to_panel`,
+    /// `:mvp`/`move_to_panel`) get a *conditional* prompt: only when
+    /// the resolved destination already exists.
+    fn maybe_destructive_confirm(
+        &self,
+        cmd: &Command,
+        _app_state: &AppState,
+        con: &AppContext,
+    ) -> Option<(String, Vec<String>, String)> {
+        let selected_path = self
+            .panels
+            .state()
+            .selected_path()
+            .map(|p| p.to_path_buf());
+        let trash_prompt = |path: Option<&std::path::Path>| -> (String, Vec<String>, String) {
+            let body = path_label_or_unknown(path);
+            let title = match path {
+                Some(p) => format!(
+                    "Trash {}?",
+                    p.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.to_string_lossy().to_string()),
+                ),
+                None => "Trash file?".to_string(),
+            };
+            (title, body, "Trash".to_string())
+        };
+        let other_panel_path = self.panels.get_other_panel_path();
+        match cmd {
+            Command::VerbInvocate(invocation) => {
+                // Resolve the verb by name. We don't have a sel_info
+                // handy here; the verb-name lookup alone is enough to
+                // decide whether to confirm.
+                let verb = con
+                    .verb_store
+                    .verbs()
+                    .iter()
+                    .find(|v| v.has_name(&invocation.name))?;
+                if verb.is_internal(Internal::trash) {
+                    return Some(trash_prompt(selected_path.as_deref()));
+                }
+                // Conditional cp/mv-family overwrite check.
+                if let Some(target) = resolve_overwrite_target(
+                    verb,
+                    invocation.args.as_deref(),
+                    selected_path.as_deref(),
+                    other_panel_path.as_deref(),
+                ) {
+                    return Some(overwrite_prompt(&target));
+                }
+                if !verb.requires_confirm {
+                    return None;
+                }
+                let name = verb
+                    .names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| invocation.name.clone());
+                let body = path_label_or_unknown(selected_path.as_deref());
+                Some((format!("Run :{name}?"), body, verb_confirm_label(&name)))
+            }
+            Command::VerbTrigger { verb_id, .. } => {
+                let verb = con.verb_store.verb(*verb_id);
+                if verb.is_internal(Internal::trash) {
+                    return Some(trash_prompt(selected_path.as_deref()));
+                }
+                // Triggers don't carry user-typed args, so only the
+                // `{other-panel-directory}` form (cpp/mvp) is reachable
+                // here without an invocation string.
+                if let Some(target) = resolve_overwrite_target(
+                    verb,
+                    None,
+                    selected_path.as_deref(),
+                    other_panel_path.as_deref(),
+                ) {
+                    return Some(overwrite_prompt(&target));
+                }
+                if !verb.requires_confirm {
+                    return None;
+                }
+                let name = verb.names.first().cloned().unwrap_or_default();
+                let body = path_label_or_unknown(selected_path.as_deref());
+                Some((format!("Run :{name}?"), body, verb_confirm_label(&name)))
+            }
+            Command::Internal { internal, .. } if *internal == Internal::trash => {
+                Some(trash_prompt(selected_path.as_deref()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Inspect a command and, if it would fan out across more than one
+    /// staged path, return `(title, body, confirm_label, danger)` for
+    /// a bulk-staging confirmation overlay. Returns `None` when the
+    /// command does not run against the staging area, when the stage
+    /// has fewer than two paths, or when the verb is a stage-management
+    /// internal (e.g. `:unstage`) that should not surface a fan-out
+    /// prompt.
+    ///
+    /// The bulk overlay always supersedes the destructive-verb and
+    /// overwrite-check branches — the user only sees one confirmation
+    /// per dispatch. `danger` is set to the verb's `requires_confirm`
+    /// flag so destructive bulk ops still get the red palette.
+    fn maybe_bulk_stage_confirm(
+        &self,
+        cmd: &Command,
+        app_state: &AppState,
+        con: &AppContext,
+    ) -> Option<(String, Vec<String>, String, bool)> {
+        // Only fire when the stage panel is the active panel. When the
+        // active panel is a tree/preview, the verb runs against the
+        // tree's current selection — a single file — even if the stage
+        // is non-empty.
+        if self.panels.state().get_type() != PanelStateType::Stage {
+            return None;
+        }
+        let count = app_state.stage.len();
+        if count < 2 {
+            return None;
+        }
+        let verb = match cmd {
+            Command::VerbInvocate(invocation) => con
+                .verb_store
+                .verbs()
+                .iter()
+                .find(|v| v.has_name(&invocation.name))?,
+            Command::VerbTrigger { verb_id, .. } => con.verb_store.verb(*verb_id),
+            _ => return None,
+        };
+        // Skip stage-management internals — these manipulate the
+        // staging area itself rather than acting on the staged paths.
+        if let Some(internal) = verb.get_internal() {
+            if is_stage_management_internal(internal) {
+                return None;
+            }
+        }
+        let name = verb
+            .names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<verb>".to_string());
+        let title = format!("Run :{name} on {count} files?");
+        let body = bulk_stage_body(app_state.stage.paths());
+        let confirm_label = verb_confirm_label(&name);
+        let danger = verb.requires_confirm;
+        Some((title, body, confirm_label, danger))
+    }
+
+    /// Translate an `OverlayOutcome` returned by the overlay's event
+    /// handler into the App's state changes:
+    /// - `Stay` — no-op, overlay remains active
+    /// - `Close` — drop the overlay
+    /// - `CloseAndRun` — drop the overlay then run the command
+    /// - `CloseAndFocus` — drop the overlay then synthesize a `:focus <path>` invocation
+    fn handle_overlay_outcome(
+        &mut self,
+        w: &mut W,
+        outcome: OverlayOutcome,
+        panel_skin: &PanelSkin,
+        app_state: &mut AppState,
+        con: &mut AppContext,
+    ) -> Result<(), ProgramError> {
+        match outcome {
+            OverlayOutcome::Stay => {}
+            OverlayOutcome::Close => {
+                self.overlay = None;
+            }
+            OverlayOutcome::CloseAndRun(cmd) => {
+                self.overlay = None;
+                // Bypass the confirmation intercept on this re-entry —
+                // the user has just confirmed the destructive action.
+                self.skip_confirm = true;
+                self.apply_command(w, &cmd, panel_skin, app_state, con)?;
+            }
+            OverlayOutcome::CloseAndFocus(path) => {
+                self.overlay = None;
+                let invocation = crate::verb::VerbInvocation::new(
+                    "focus".to_string(),
+                    Some(path.to_string_lossy().to_string()),
+                    false,
+                );
+                let cmd = Command::VerbInvocate(invocation);
+                self.apply_command(w, &cmd, panel_skin, app_state, con)?;
+            }
+        }
         Ok(())
     }
 
@@ -505,12 +780,19 @@ impl App {
 
         loop {
             if !self.quitting {
-                self.panels.display_panels(w, &skin, &app_state, con)?;
+                self.panels
+                    .display_panels(w, &skin, &app_state, con, self.overlay.as_ref())?;
                 time!(
                     Debug,
                     "pending_tasks",
-                    self.panels
-                        .do_pending_tasks(w, &skin, &mut dam, &mut app_state, con)?,
+                    self.panels.do_pending_tasks(
+                        w,
+                        &skin,
+                        &mut dam,
+                        &mut app_state,
+                        con,
+                        self.overlay.as_ref(),
+                    )?,
                 );
             }
 
@@ -540,17 +822,47 @@ impl App {
                     }
                     let mut handled = false;
 
-                    // app level handling
-                    if let Some((x, y)) = event.as_click() {
-                        let clicked_idx = self.panels.clicked_panel_index(x, y);
-                        if clicked_idx != self.panels.active_panel_idx() {
-                            // panel activation click
-                            self.panels.activate(clicked_idx);
+                    // overlay-level handling: when an overlay is active it
+                    // captures all key/mouse events before any panel sees
+                    // them. Resize is *not* intercepted — it must always
+                    // reach the panel layer so layout stays consistent.
+                    if self.overlay.is_some()
+                        && !matches!(event.event, Event::Resize(_, _))
+                    {
+                        let outcome = if let Some(key) = event.key_combination {
+                            self.overlay.as_mut().map(|ov| ov.handle_key(key))
+                        } else if let Event::Mouse(mev) = event.event {
+                            self.overlay.as_mut().map(|ov| ov.handle_mouse(mev))
+                        } else {
+                            // Unknown event kind while overlay is up:
+                            // consume it to keep input exclusive.
+                            Some(OverlayOutcome::Stay)
+                        };
+                        if let Some(outcome) = outcome {
+                            self.handle_overlay_outcome(
+                                w,
+                                outcome,
+                                &skin.focused,
+                                &mut app_state,
+                                con,
+                            )?;
                             handled = true;
                         }
-                    } else if let Event::Resize(mut width, mut height) = event.event {
-                        self.panels.set_terminal_size(width, height, con);
-                        handled = true;
+                    }
+
+                    // app level handling
+                    if !handled {
+                        if let Some((x, y)) = event.as_click() {
+                            let clicked_idx = self.panels.clicked_panel_index(x, y);
+                            if clicked_idx != self.panels.active_panel_idx() {
+                                // panel activation click
+                                self.panels.activate(clicked_idx);
+                                handled = true;
+                            }
+                        } else if let Event::Resize(mut width, mut height) = event.event {
+                            self.panels.set_terminal_size(width, height, con);
+                            handled = true;
+                        }
                     }
 
                     // event handled by the panel
@@ -577,7 +889,8 @@ impl App {
                         if self.quitting {
                             return Ok(self.launch_at_end.take());
                         }
-                        self.panels.display_panels(w, &skin, &app_state, con)?;
+                        self.panels
+                            .display_panels(w, &skin, &app_state, con, self.overlay.as_ref())?;
                         time!(
                             "sequence pending tasks",
                             self.panels.do_pending_tasks(
@@ -585,7 +898,8 @@ impl App {
                                 &skin,
                                 &mut dam,
                                 &mut app_state,
-                                con
+                                con,
+                                self.overlay.as_ref(),
                             )?,
                         );
                     }
@@ -605,6 +919,201 @@ impl App {
     }
 }
 
+/// Render the selected path (or a placeholder) as the body of a
+/// confirmation overlay.
+fn path_label_or_unknown(p: Option<&std::path::Path>) -> Vec<String> {
+    match p {
+        Some(p) => vec![p.to_string_lossy().to_string()],
+        None => vec!["(no selection)".to_string()],
+    }
+}
+
+/// Pick the confirm-button label for a destructive verb. We use the
+/// verb name capitalised; `rm` is special-cased to "Delete" because
+/// it's the most common path.
+fn verb_confirm_label(verb_name: &str) -> String {
+    match verb_name {
+        "rm" => "Delete".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Run".to_string(),
+            }
+        }
+    }
+}
+
+/// Build a `(title, body, confirm_label)` triple for an overwrite
+/// confirmation. Used by `:cp`/`:mv`/`:cpp`/`:mvp` when the resolved
+/// destination already exists.
+fn overwrite_prompt(target: &std::path::Path) -> (String, Vec<String>, String) {
+    let basename = target
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| target.to_string_lossy().to_string());
+    let body = vec![target.to_string_lossy().to_string()];
+    (
+        format!("Overwrite {basename}?"),
+        body,
+        "Overwrite".to_string(),
+    )
+}
+
+/// Resolve the would-be destination path for a cp/mv-family verb, but
+/// only when that destination already exists on disk (i.e. the verb
+/// would overwrite something). Returns `None` for any verb that isn't
+/// in the family, when the destination can't be resolved cleanly, or
+/// when the destination doesn't exist.
+///
+/// Two patterns are recognised:
+///
+/// * `{newpath:path-from-parent}` (verbs `:cp`, `:mv`, `:rename`):
+///   the user-supplied second argument is interpreted relative to the
+///   selection's parent directory.
+/// * `{other-panel-directory}` (verbs `:cpp`/`copy_to_panel`,
+///   `:mvp`/`move_to_panel`): the destination directory is the
+///   currently-focused directory in the other panel; the actual
+///   collision target is `<dir>/<source-filename>`.
+///
+/// If `target == source` the function returns `None` — the verb's own
+/// error path will handle that case.
+fn resolve_overwrite_target(
+    verb: &crate::verb::Verb,
+    invocation_args: Option<&str>,
+    selected_path: Option<&std::path::Path>,
+    other_panel_path: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    use crate::{
+        path::{
+            self,
+            PathAnchor,
+        },
+        verb::VerbExecution,
+    };
+
+    // Only external verbs reach the cp/mv-family — internals don't.
+    let VerbExecution::External(ext) = &verb.execution else {
+        return None;
+    };
+
+    let source = selected_path?;
+
+    // Family detection: the exec pattern's first token is the binary
+    // we shell out to. We accept the common copy/move binaries
+    // (covering both Unix and Windows code paths). This avoids false
+    // positives on, say, a user's `:rename` verb that uses
+    // `{newpath:path-from-parent}` but is structurally a rename — the
+    // destination still needs the prompt, so we accept `mv`/`move` here
+    // as well.
+    let bin = ext.exec_pattern.tokens().first().map(String::as_str)?;
+    let is_copy_or_move = matches!(bin, "mv" | "cp" | "rsync" | "xcopy" | "cmd");
+    if !is_copy_or_move {
+        return None;
+    }
+
+    // Pattern A: `{other-panel-directory}` — destination is the other
+    // panel's focused directory. Must include `{file}` (or some
+    // selection group) so we know the source filename.
+    if ext.exec_pattern.has_other_panel_group() {
+        let dir_path = other_panel_path?;
+        let dir = path::closest_dir(dir_path);
+        let basename = source.file_name()?;
+        let target = dir.join(basename);
+        if target == source {
+            return None;
+        }
+        return target.symlink_metadata().ok().map(|_| target);
+    }
+
+    // Pattern B: `{newpath:path-from-parent}` — extract the user's
+    // typed value for the `newpath` argument and resolve it relative
+    // to the source's parent directory.
+    //
+    // The `path-from-parent` flag lives in the *exec* pattern, not the
+    // invocation pattern, so we walk the exec pattern's arg defs.
+    let parser = verb.invocation_parser.as_ref()?;
+    let args = invocation_args?;
+    let values = parser.parse(args)?;
+    let mut path_from_parent_arg: Option<String> = None;
+    ext.exec_pattern.visit_arg_defs(&mut |arg_def| {
+        if path_from_parent_arg.is_none()
+            && arg_def.has_flag(crate::verb::VerbArgFlag::PathFromParent)
+        {
+            path_from_parent_arg = Some(arg_def.name.clone());
+        }
+    });
+    let arg_name = path_from_parent_arg?;
+    let value = values.get(&arg_name)?;
+    let parent = source.parent()?;
+    let mut target = path::path_from(parent, PathAnchor::Unspecified, value);
+    // If the resolved target is an existing directory and the source
+    // is a regular file, the actual write target is `target/<basename>`.
+    let target_meta = target.symlink_metadata().ok()?;
+    if target_meta.is_dir() {
+        if source.is_dir() {
+            // dir -> dir: cp/mv into a directory means writing the
+            // source as a child of `target`. The actual collision
+            // target is `target/<source-basename>`. If that path does
+            // not already exist, no overwrite occurs and we should
+            // *not* prompt.
+            let basename = source.file_name()?;
+            target = target.join(basename);
+            target.symlink_metadata().ok()?;
+        } else {
+            // file -> dir: actual write target is `target/<basename>`.
+            let basename = source.file_name()?;
+            target = target.join(basename);
+            // Re-check existence at the joined path: only prompt if it
+            // collides with an existing file.
+            target.symlink_metadata().ok()?;
+        }
+    }
+    if target == source {
+        return None;
+    }
+    Some(target)
+}
+
+/// Whether an internal verb is a stage-management action (i.e. it
+/// edits the staging area itself rather than acting on the staged
+/// paths). The bulk-confirm overlay must skip these — prompting
+/// "Run :unstage on 5 files?" when the user just wants to drop a
+/// single highlighted entry would be nonsensical.
+fn is_stage_management_internal(internal: Internal) -> bool {
+    matches!(
+        internal,
+        Internal::stage
+            | Internal::unstage
+            | Internal::toggle_stage
+            | Internal::clear_stage
+            | Internal::stage_all_directories
+            | Internal::stage_all_files
+            | Internal::open_staging_area
+            | Internal::close_staging_area
+            | Internal::toggle_staging_area
+            | Internal::focus_staging_area_no_open
+    )
+}
+
+/// Build the body of the bulk-confirm overlay: list each staged path
+/// (truncated tail with an ellipsis line if there are more than the
+/// listing cap). The `ConfirmOverlay` already handles vertical
+/// scrolling when the body overflows the visible area, so we list all
+/// paths up to a sane cap and surface remainder with a `…` line.
+fn bulk_stage_body(paths: &[std::path::PathBuf]) -> Vec<String> {
+    const MAX_LISTED: usize = 32;
+    let mut body: Vec<String> = paths
+        .iter()
+        .take(MAX_LISTED)
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    if paths.len() > MAX_LISTED {
+        body.push(format!("… and {} more", paths.len() - MAX_LISTED));
+    }
+    body
+}
+
 /// clear the file sizes and git stats cache.
 ///
 /// This should be done on Refresh actions and after any external command.
@@ -613,4 +1122,545 @@ fn clear_caches() {
     git::clear_status_computer_cache();
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     crate::filesystems::clear_cache();
+}
+
+#[cfg(test)]
+mod confirm_helper_tests {
+    use {
+        super::*,
+        std::path::Path,
+    };
+
+    #[test]
+    fn rm_label_is_delete() {
+        assert_eq!(verb_confirm_label("rm"), "Delete");
+    }
+
+    #[test]
+    fn other_verb_is_capitalised() {
+        assert_eq!(verb_confirm_label("zap"), "Zap");
+        assert_eq!(verb_confirm_label("trash"), "Trash");
+    }
+
+    #[test]
+    fn empty_verb_falls_back_to_run() {
+        assert_eq!(verb_confirm_label(""), "Run");
+    }
+
+    #[test]
+    fn path_label_uses_path_string() {
+        let p = Path::new("/tmp/foo.txt");
+        assert_eq!(
+            path_label_or_unknown(Some(p)),
+            vec!["/tmp/foo.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn path_label_uses_placeholder_when_none() {
+        assert_eq!(
+            path_label_or_unknown(None),
+            vec!["(no selection)".to_string()]
+        );
+    }
+
+    // -------------------------------------------------------------
+    // overwrite_prompt + resolve_overwrite_target
+    // -------------------------------------------------------------
+
+    #[test]
+    fn overwrite_prompt_uses_basename_in_title() {
+        let (title, body, label) = overwrite_prompt(Path::new("/tmp/dir/foo.txt"));
+        assert_eq!(title, "Overwrite foo.txt?");
+        assert_eq!(body, vec!["/tmp/dir/foo.txt".to_string()]);
+        assert_eq!(label, "Overwrite");
+    }
+
+    #[test]
+    fn overwrite_prompt_falls_back_to_full_path_for_root_like_paths() {
+        // A path with no file_name (e.g. "/") yields the full string.
+        let (title, _body, _label) = overwrite_prompt(Path::new("/"));
+        // file_name() of "/" is None -> falls back to the path itself.
+        assert!(title.contains("Overwrite"));
+        assert!(title.contains('/'));
+    }
+
+    /// Build a fresh verb store with default conf for use in tests.
+    fn fresh_store() -> crate::verb::VerbStore {
+        let mut conf = crate::conf::Conf::default();
+        crate::verb::VerbStore::new(&mut conf).expect("default store")
+    }
+
+    /// Lookup the first verb in a fresh store with `name` as a shortcut.
+    /// Returns the verb's *id* so the caller can index back into the
+    /// store (verbs are not `Clone`).
+    fn verb_id_by_name(
+        store: &crate::verb::VerbStore,
+        name: &str,
+    ) -> usize {
+        store
+            .verbs()
+            .iter()
+            .position(|v| v.has_name(name))
+            .unwrap_or_else(|| panic!("verb {name} must exist"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_overwrite_target_none_source_returns_none() {
+        // No selected path → no source → no overwrite check possible.
+        let store = fresh_store();
+        let id = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[id];
+        let target = resolve_overwrite_target(
+            verb,
+            Some("/tmp/some_dest"),
+            None,
+            None,
+        );
+        assert!(target.is_none(), "no source must yield no overwrite prompt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_to_nonexisting_destination_returns_none() {
+        let store = fresh_store();
+        let id = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[id];
+        // `source` doesn't have to exist — only `target` is stat'd.
+        let source = std::path::Path::new("/tmp/a/source.txt");
+        let target = resolve_overwrite_target(
+            verb,
+            Some("/tmp/no-such-place-XYZ-broot-test/dst"),
+            Some(source),
+            None,
+        );
+        assert!(target.is_none(), "no overlay when dest doesn't exist");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_to_existing_destination_returns_target() {
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("broot_resolve_src_{}.txt", std::process::id()));
+        let dst_path = dir.join(format!("broot_resolve_dst_{}.txt", std::process::id()));
+        std::fs::write(&src_path, b"src").unwrap();
+        std::fs::write(&dst_path, b"dst").unwrap();
+
+        let store = fresh_store();
+        let id = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[id];
+
+        // The user typed `:cp <dst_path>`. Args are absolute; resolver
+        // treats them as-is (TILDE/leading-/ rule in path::path_from).
+        let target = resolve_overwrite_target(
+            verb,
+            Some(dst_path.to_str().unwrap()),
+            Some(&src_path),
+            None,
+        );
+        assert_eq!(target.as_deref(), Some(dst_path.as_path()));
+
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&dst_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mv_to_existing_destination_returns_target() {
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("broot_mv_src_{}.txt", std::process::id()));
+        let dst_path = dir.join(format!("broot_mv_dst_{}.txt", std::process::id()));
+        std::fs::write(&src_path, b"src").unwrap();
+        std::fs::write(&dst_path, b"dst").unwrap();
+
+        let store = fresh_store();
+        let id = verb_id_by_name(&store, "mv");
+        let verb = &store.verbs()[id];
+
+        let target = resolve_overwrite_target(
+            verb,
+            Some(dst_path.to_str().unwrap()),
+            Some(&src_path),
+            None,
+        );
+        assert_eq!(target.as_deref(), Some(dst_path.as_path()));
+
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&dst_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mv_to_nonexisting_destination_returns_none() {
+        let store = fresh_store();
+        let id = verb_id_by_name(&store, "mv");
+        let verb = &store.verbs()[id];
+        let source = std::path::Path::new("/tmp/source.txt");
+        let target = resolve_overwrite_target(
+            verb,
+            Some("/tmp/no-such-place-broot-mv-test/dst"),
+            Some(source),
+            None,
+        );
+        assert!(target.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_into_existing_directory_with_collision_returns_joined_target() {
+        // Source: <tmp>/<src.txt>; user types `:cp <existing-dir>`;
+        // <existing-dir>/<src.txt> already exists -> overlay target is
+        // the joined path.
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let dest_dir = dir.join(format!("broot_cp_join_{id}"));
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let src_path = dir.join(format!("broot_cp_join_src_{id}.txt"));
+        std::fs::write(&src_path, b"src").unwrap();
+        let collision_path = dest_dir.join(src_path.file_name().unwrap());
+        std::fs::write(&collision_path, b"old").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(
+            verb,
+            Some(dest_dir.to_str().unwrap()),
+            Some(&src_path),
+            None,
+        );
+        assert_eq!(target.as_deref(), Some(collision_path.as_path()));
+
+        let _ = std::fs::remove_file(&collision_path);
+        let _ = std::fs::remove_dir(&dest_dir);
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_dir_into_dir_without_collision_returns_none() {
+        // Source is a directory; user types `:cp <existing-dir>`. cp/mv
+        // semantics into an existing directory create a child entry
+        // named after the source basename. If that joined path does not
+        // already exist, no overlay must fire.
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let dest_dir = dir.join(format!("broot_cp_dir_dir_nocol_{id}"));
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let src_dir = dir.join(format!("broot_cp_dir_dir_src_{id}"));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        // Don't pre-create the joined collision path.
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(
+            verb,
+            Some(dest_dir.to_str().unwrap()),
+            Some(&src_dir),
+            None,
+        );
+        assert!(
+            target.is_none(),
+            "dir-to-dir without joined-path collision must not prompt; got {target:?}"
+        );
+
+        let _ = std::fs::remove_dir(&src_dir);
+        let _ = std::fs::remove_dir(&dest_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_dir_into_dir_with_collision_returns_joined_target() {
+        // Source dir <tmp>/<src>; user types `:cp <existing-dir>`;
+        // <existing-dir>/<src> exists -> overlay target is the joined path.
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let dest_dir = dir.join(format!("broot_cp_dir_dir_col_{id}"));
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let src_dir = dir.join(format!("broot_cp_dir_dir_col_src_{id}"));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let collision_path = dest_dir.join(src_dir.file_name().unwrap());
+        std::fs::create_dir_all(&collision_path).unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(
+            verb,
+            Some(dest_dir.to_str().unwrap()),
+            Some(&src_dir),
+            None,
+        );
+        assert_eq!(target.as_deref(), Some(collision_path.as_path()));
+
+        let _ = std::fs::remove_dir(&collision_path);
+        let _ = std::fs::remove_dir(&src_dir);
+        let _ = std::fs::remove_dir(&dest_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_into_existing_directory_without_collision_returns_none() {
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let dest_dir = dir.join(format!("broot_cp_nocol_{id}"));
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        // Don't pre-create the collision file.
+        let src_path = dir.join(format!("broot_cp_nocol_src_{id}.txt"));
+        std::fs::write(&src_path, b"src").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(
+            verb,
+            Some(dest_dir.to_str().unwrap()),
+            Some(&src_path),
+            None,
+        );
+        assert!(target.is_none(), "no overlay when joined target absent");
+
+        let _ = std::fs::remove_dir(&dest_dir);
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_to_panel_with_collision_returns_target() {
+        // The other panel's directory contains a file with the same
+        // basename as the source — overlay must trigger.
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let other_dir = dir.join(format!("broot_cpp_other_{id}"));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let src_path = dir.join(format!("broot_cpp_src_{id}.txt"));
+        std::fs::write(&src_path, b"src").unwrap();
+        let collision = other_dir.join(src_path.file_name().unwrap());
+        std::fs::write(&collision, b"old").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "copy_to_panel");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(verb, None, Some(&src_path), Some(&other_dir));
+        assert_eq!(target.as_deref(), Some(collision.as_path()));
+
+        let _ = std::fs::remove_file(&collision);
+        let _ = std::fs::remove_dir(&other_dir);
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_to_panel_without_collision_returns_none() {
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let other_dir = dir.join(format!("broot_cpp_nocol_other_{id}"));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        // Don't pre-create the collision file.
+        let src_path = dir.join(format!("broot_cpp_nocol_src_{id}.txt"));
+        std::fs::write(&src_path, b"src").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "copy_to_panel");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(verb, None, Some(&src_path), Some(&other_dir));
+        assert!(target.is_none());
+
+        let _ = std::fs::remove_dir(&other_dir);
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_to_panel_without_collision_returns_none() {
+        // mvp into a fresh dir whose target basename does not exist
+        // must NOT prompt — the move would not overwrite anything.
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let other_dir = dir.join(format!("broot_mvp_nocol_other_{id}"));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let src_path = dir.join(format!("broot_mvp_nocol_src_{id}.txt"));
+        std::fs::write(&src_path, b"src").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "move_to_panel");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(verb, None, Some(&src_path), Some(&other_dir));
+        assert!(target.is_none());
+
+        let _ = std::fs::remove_dir(&other_dir);
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_to_panel_with_collision_returns_target() {
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let other_dir = dir.join(format!("broot_mvp_other_{id}"));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let src_path = dir.join(format!("broot_mvp_src_{id}.txt"));
+        std::fs::write(&src_path, b"src").unwrap();
+        let collision = other_dir.join(src_path.file_name().unwrap());
+        std::fs::write(&collision, b"old").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "move_to_panel");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(verb, None, Some(&src_path), Some(&other_dir));
+        assert_eq!(target.as_deref(), Some(collision.as_path()));
+
+        let _ = std::fs::remove_file(&collision);
+        let _ = std::fs::remove_dir(&other_dir);
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cp_self_to_self_returns_none() {
+        // Source == target: no overlay; verb's own path handles the
+        // "same file" error.
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("broot_cp_self_{}.txt", std::process::id()));
+        std::fs::write(&src_path, b"src").unwrap();
+
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "cp");
+        let verb = &store.verbs()[vid];
+
+        let target = resolve_overwrite_target(
+            verb,
+            Some(src_path.to_str().unwrap()),
+            Some(&src_path),
+            None,
+        );
+        assert!(target.is_none(), "self-overwrite must not prompt");
+
+        let _ = std::fs::remove_file(&src_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rm_verb_is_not_recognised_as_overwrite_family() {
+        // `:rm` is destructive but goes through `requires_confirm`,
+        // not the overwrite resolver. Sanity-check.
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "rm");
+        let verb = &store.verbs()[vid];
+        let p = std::path::Path::new("/tmp/whatever.txt");
+        let target = resolve_overwrite_target(verb, Some("ignored"), Some(p), None);
+        assert!(target.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn internal_verb_returns_none() {
+        // Pick any internal verb (e.g. `:trash`).
+        let store = fresh_store();
+        let vid = verb_id_by_name(&store, "trash");
+        let verb = &store.verbs()[vid];
+        let p = std::path::Path::new("/tmp/whatever.txt");
+        let target = resolve_overwrite_target(verb, None, Some(p), None);
+        assert!(target.is_none());
+    }
+
+    // -------------------------------------------------------------
+    // bulk-stage helpers (Task 10)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn stage_management_internals_are_skipped() {
+        // These all manipulate the staging area itself rather than
+        // acting on its contents. They must NOT trigger the bulk
+        // overlay even when the user invokes them with the stage
+        // panel active and >1 staged files.
+        for internal in [
+            Internal::stage,
+            Internal::unstage,
+            Internal::toggle_stage,
+            Internal::clear_stage,
+            Internal::stage_all_directories,
+            Internal::stage_all_files,
+            Internal::open_staging_area,
+            Internal::close_staging_area,
+            Internal::toggle_staging_area,
+            Internal::focus_staging_area_no_open,
+        ] {
+            assert!(
+                is_stage_management_internal(internal),
+                "{internal:?} must be classified as stage-management"
+            );
+        }
+    }
+
+    #[test]
+    fn non_stage_management_internals_are_not_skipped() {
+        // Sample of internals that should NOT be classified as
+        // stage-management — these may legitimately fan out across
+        // staged paths (open_stay, copy_path) or are unrelated.
+        for internal in [
+            Internal::open_stay,
+            Internal::open_leave,
+            Internal::trash,
+            Internal::copy_path,
+            Internal::focus,
+        ] {
+            assert!(
+                !is_stage_management_internal(internal),
+                "{internal:?} must NOT be classified as stage-management"
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_stage_body_lists_each_path() {
+        let paths = vec![
+            std::path::PathBuf::from("/a/b/c.txt"),
+            std::path::PathBuf::from("/d/e/f.rs"),
+            std::path::PathBuf::from("/g/h.md"),
+        ];
+        let body = bulk_stage_body(&paths);
+        assert_eq!(body.len(), 3);
+        assert_eq!(body[0], "/a/b/c.txt");
+        assert_eq!(body[1], "/d/e/f.rs");
+        assert_eq!(body[2], "/g/h.md");
+    }
+
+    #[test]
+    fn bulk_stage_body_truncates_with_ellipsis_marker() {
+        // Construct 40 paths; cap is 32 — body should be 33 lines (32
+        // paths + 1 "and 8 more" marker).
+        let paths: Vec<std::path::PathBuf> = (0..40)
+            .map(|i| std::path::PathBuf::from(format!("/tmp/file_{i}.txt")))
+            .collect();
+        let body = bulk_stage_body(&paths);
+        assert_eq!(body.len(), 33);
+        assert!(body.last().unwrap().contains("8 more"));
+    }
+
+    #[test]
+    fn bulk_stage_body_handles_empty_input() {
+        let body = bulk_stage_body(&[]);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn bulk_stage_body_at_cap_does_not_add_marker() {
+        let paths: Vec<std::path::PathBuf> = (0..32)
+            .map(|i| std::path::PathBuf::from(format!("/x/{i}")))
+            .collect();
+        let body = bulk_stage_body(&paths);
+        assert_eq!(body.len(), 32);
+        assert!(!body.last().unwrap().contains("more"));
+    }
 }

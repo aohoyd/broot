@@ -227,6 +227,7 @@ StyleMap! {
     hex_non_ascii: ansi(167), None, []
     staging_area_title: gray(22), gray(2), [] / gray(20), gray(3), []
     mode_command_mark: gray(5), ansi(204), [Bold]
+    frame_title: ansi(178), None, [Bold] / gray(13), None, []
     good_to_bad_0: ansi(28), None, []
     good_to_bad_1: ansi(29), None, []
     good_to_bad_2: ansi(29), None, []

@@ -74,6 +74,12 @@ pub struct Verb {
     /// triggered with a keyboard shortcut
     pub auto_exec: bool,
 
+    /// whether the verb is destructive and must prompt the user with
+    /// a confirmation overlay before executing. Defaults to `false`.
+    /// Set on built-in destructive verbs (`rm`) and overridable per
+    /// verb via the `confirm` field in `VerbConf`.
+    pub requires_confirm: bool,
+
     /// whether to show the verb in help screen
     /// (if we show all input related actions, the doc is unusable)
     pub show_in_doc: bool,
@@ -133,6 +139,7 @@ impl Verb {
             needs_another_panel,
             needs_staging,
             auto_exec: true,
+            requires_confirm: false,
             show_in_doc: true,
             panels: Vec::new(),
             impacted_panel: PanelReference::default(),
@@ -195,6 +202,16 @@ impl Verb {
         b: bool,
     ) -> &mut Self {
         self.auto_exec = b;
+        self
+    }
+
+    /// Mark the verb as destructive — the App will prompt the user
+    /// with a confirmation overlay before executing it.
+    pub fn with_confirm(
+        &mut self,
+        b: bool,
+    ) -> &mut Self {
+        self.requires_confirm = b;
         self
     }
 
@@ -367,5 +384,53 @@ pub fn check_verb_name(name: &str) -> Result<(), ConfError> {
         Err(ConfError::InvalidVerbName {
             name: name.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::verb::{
+            ExecPattern,
+            ExternalExecution,
+            ExternalExecutionMode,
+        },
+    };
+
+    fn make_external_verb() -> Verb {
+        let exec = VerbExecution::External(ExternalExecution::new(
+            ExecPattern::from_string("rm -rf {file}"),
+            ExternalExecutionMode::StayInBroot,
+        ));
+        Verb::new(
+            0,
+            Some("rm"),
+            exec,
+            VerbDescription::from_code("rm -rf {file}".to_string()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn requires_confirm_defaults_to_false() {
+        let v = make_external_verb();
+        assert!(!v.requires_confirm);
+    }
+
+    #[test]
+    fn with_confirm_true_sets_field() {
+        let mut v = make_external_verb();
+        v.with_confirm(true);
+        assert!(v.requires_confirm);
+    }
+
+    #[test]
+    fn with_confirm_false_clears_field() {
+        let mut v = make_external_verb();
+        v.with_confirm(true);
+        assert!(v.requires_confirm);
+        v.with_confirm(false);
+        assert!(!v.requires_confirm);
     }
 }

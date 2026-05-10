@@ -632,6 +632,13 @@ pub trait PanelState {
                 }
             }
             Internal::escape => CmdResult::HandleInApp(Internal::escape),
+            Internal::goto_bookmarks => {
+                // Open the Goto / Bookmarks overlay populated from the
+                // resolved `AppContext::bookmarks` list. The overlay
+                // takes its own copy so it can outlive the dispatch.
+                let overlay = Overlay::Goto(GotoOverlay::new(cc.app.con.bookmarks.clone()));
+                CmdResult::OpenOverlay(Box::new(overlay))
+            }
             Internal::focus_staging_area_no_open => {
                 CmdResult::HandleInApp(Internal::focus_staging_area_no_open)
             }
@@ -1138,6 +1145,22 @@ pub trait PanelState {
         None
     }
 
+    /// Title to embed in the top edge of the panel frame.
+    ///
+    /// Default implementation: if `tree_root()` returns a path, use a
+    /// home-substituted, length-bounded label; otherwise fall back to a
+    /// short label derived from `get_type()` so the frame is never
+    /// headerless. `max_w` is the maximum render width in columns.
+    fn frame_title(
+        &self,
+        max_w: u16,
+    ) -> String {
+        if let Some(root) = self.tree_root() {
+            return crate::display::frame::path_label(root, max_w);
+        }
+        default_frame_title_for_type(self.get_type()).to_string()
+    }
+
     fn watchable_paths(&self) -> Vec<PathBuf> {
         vec![]
     }
@@ -1323,6 +1346,19 @@ pub trait PanelState {
     }
 }
 
+/// Short fallback title for a panel state that does not have a tree
+/// root. Used by `PanelState::frame_title` when `tree_root()` is `None`.
+pub(crate) fn default_frame_title_for_type(t: PanelStateType) -> &'static str {
+    match t {
+        PanelStateType::Help => "Help",
+        PanelStateType::Preview => "Preview",
+        PanelStateType::Stage => "Stage",
+        PanelStateType::Trash => "Trash",
+        PanelStateType::Fs => "Filesystems",
+        PanelStateType::Tree => "Tree",
+    }
+}
+
 pub fn get_arg<T: Copy + FromStr>(
     verb_invocation: Option<&VerbInvocation>,
     internal_exec: &InternalExecution,
@@ -1333,6 +1369,52 @@ pub fn get_arg<T: Copy + FromStr>(
         .or(internal_exec.arg.as_ref())
         .and_then(|s| s.parse::<T>().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod frame_title_tests {
+    use super::*;
+
+    #[test]
+    fn default_frame_title_per_type_is_non_empty() {
+        for ty in [
+            PanelStateType::Help,
+            PanelStateType::Preview,
+            PanelStateType::Stage,
+            PanelStateType::Trash,
+            PanelStateType::Fs,
+            PanelStateType::Tree,
+        ] {
+            let label = default_frame_title_for_type(ty);
+            assert!(
+                !label.is_empty(),
+                "default frame title for {:?} must not be empty",
+                ty
+            );
+        }
+    }
+
+    #[test]
+    fn default_frame_title_specific_values() {
+        assert_eq!(default_frame_title_for_type(PanelStateType::Help), "Help");
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Preview),
+            "Preview"
+        );
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Stage),
+            "Stage"
+        );
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Trash),
+            "Trash"
+        );
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Fs),
+            "Filesystems"
+        );
+        assert_eq!(default_frame_title_for_type(PanelStateType::Tree), "Tree");
+    }
 }
 
 fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {

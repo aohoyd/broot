@@ -2,10 +2,12 @@ mod app;
 mod app_context;
 mod app_panels;
 mod app_state;
+mod bookmark;
 mod cmd_context;
 mod cmd_result;
 mod display_context;
 mod mode;
+pub mod overlay;
 mod panel;
 mod panel_id;
 mod panel_purpose;
@@ -22,10 +24,12 @@ pub use {
     app_context::AppContext,
     app_panels::*,
     app_state::*,
+    bookmark::BookmarkEntry,
     cmd_context::*,
     cmd_result::*,
     display_context::*,
     mode::*,
+    overlay::{ConfirmFocus, ConfirmOverlay, GotoOverlay, Overlay, OverlayOutcome, OverlayState},
     panel::Panel,
     panel_id::PanelId,
     panel_purpose::PanelPurpose,
@@ -37,3 +41,7 @@ pub use {
     state_type::PanelStateType,
     status::Status,
 };
+
+// `build_bookmarks` is consumed inside the crate (by `AppContext`); we
+// don't re-export it.
+pub(crate) use bookmark::build_bookmarks;

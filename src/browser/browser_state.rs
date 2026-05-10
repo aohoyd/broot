@@ -110,7 +110,11 @@ impl BrowserState {
     }
 
     pub fn page_height(screen: Screen) -> usize {
-        screen.height as usize - 2 // br shouldn't be displayed when the screen is smaller
+        // The interior content rows of a panel are bounded by:
+        //   - 1 status row + 1 input row at the bottom of the screen
+        //   - 1 top frame edge + 1 bottom frame edge inset by the panel frame
+        // Use saturating_sub so very small terminals don't underflow.
+        (screen.height as usize).saturating_sub(4)
     }
 
     /// return a reference to the currently displayed tree, which
@@ -869,5 +873,40 @@ impl PanelState for BrowserState {
         } else {
             self.displayed_tree().options.pattern.raw.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen(height: u16) -> Screen {
+        Screen { width: 80, height }
+    }
+
+    #[test]
+    fn page_height_typical_terminals() {
+        // status row + input row + 2 frame rows = 4 rows reserved
+        assert_eq!(BrowserState::page_height(screen(24)), 20);
+        assert_eq!(BrowserState::page_height(screen(50)), 46);
+        assert_eq!(BrowserState::page_height(screen(80)), 76);
+    }
+
+    #[test]
+    fn page_height_minimal_terminal() {
+        // Just barely usable: 5 rows yields 1 interior row.
+        assert_eq!(BrowserState::page_height(screen(5)), 1);
+    }
+
+    #[test]
+    fn page_height_too_small_clamps_to_zero() {
+        // 4 rows is exactly the reserved chrome -> 0 interior rows.
+        assert_eq!(BrowserState::page_height(screen(4)), 0);
+    }
+
+    #[test]
+    fn page_height_zero_does_not_underflow() {
+        // 0 rows must not wrap around via unsigned underflow.
+        assert_eq!(BrowserState::page_height(screen(0)), 0);
     }
 }

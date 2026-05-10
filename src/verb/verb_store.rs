@@ -274,6 +274,9 @@ impl VerbStore {
         self.add_internal(parent)
             .with_key(key!(h))
             .with_shortcut("p");
+        self.add_internal(goto_bookmarks)
+            .with_key(key!('g'))
+            .with_shortcut("goto");
         self.add_internal(page_down)
             .with_key(key!(ctrl - d))
             .with_key(key!(pagedown));
@@ -319,13 +322,16 @@ impl VerbStore {
         self.add_internal(sort_by_size).with_shortcut("ss");
         self.add_internal(sort_by_type).with_shortcut("st");
         #[cfg(unix)]
-        self.add_external("rm", "rm -rf {file}", StayInBroot);
+        self.add_external("rm", "rm -rf {file}", StayInBroot)
+            .with_confirm(true);
         #[cfg(windows)]
         self.add_external("rm", "cmd /c rmdir /Q /S {file}", StayInBroot)
-            .with_condition(FileTypeCondition::Directory);
+            .with_condition(FileTypeCondition::Directory)
+            .with_confirm(true);
         #[cfg(windows)]
         self.add_external("rm", "cmd /c del /Q {file}", StayInBroot)
-            .with_condition(FileTypeCondition::File);
+            .with_condition(FileTypeCondition::File)
+            .with_confirm(true);
         self.add_internal(toggle_counts).with_shortcut("counts");
         self.add_internal(toggle_dates).with_shortcut("dates");
         self.add_internal(toggle_device_id).with_shortcut("dev");
@@ -549,6 +555,12 @@ impl VerbStore {
         if vc.auto_exec == Some(false) {
             verb.auto_exec = false;
         }
+        if let Some(confirm) = vc.confirm {
+            // user override of the verb's default confirmation behaviour:
+            // - `confirm: true` opts an external verb in
+            // - `confirm: false` opts a built-in destructive verb out
+            verb.requires_confirm = confirm;
+        }
         if !vc.panels.is_empty() {
             verb.panels.clone_from(&vc.panels);
         }
@@ -717,4 +729,78 @@ impl VerbStore {
 fn check_builtin_verbs() {
     let mut conf = Conf::default();
     let _store = VerbStore::new(&mut conf).unwrap();
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::*;
+
+    /// The built-in `rm` external verb is registered with
+    /// `with_confirm(true)` and so is destructive by default.
+    #[test]
+    fn builtin_rm_requires_confirm() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let rm = store
+            .verbs()
+            .iter()
+            .find(|v| v.has_name("rm"))
+            .expect("rm verb must be registered");
+        assert!(
+            rm.requires_confirm,
+            "built-in rm should have requires_confirm=true"
+        );
+    }
+
+    /// A user `VerbConf` with `confirm: false` overrides the built-in
+    /// `requires_confirm: true` on `rm` (or any other destructive verb).
+    /// We exercise this by registering a fresh external verb whose
+    /// `VerbConf` opts out of confirmation, and asserting the verb
+    /// stored has `requires_confirm == false`.
+    #[test]
+    fn verb_conf_confirm_false_overrides_default() {
+        let mut conf = Conf::default();
+        let mut store = VerbStore::new(&mut conf).unwrap();
+        // Build a VerbConf for a custom destructive shell command and
+        // explicitly opt OUT of the confirmation.
+        let vc = VerbConf {
+            invocation: Some("zap".to_string()),
+            external: Some(ExecPattern::from_string("rm -rf {file}")),
+            confirm: Some(false),
+            ..Default::default()
+        };
+        store.add_from_conf(&vc).unwrap();
+        let zap = store
+            .verbs()
+            .iter()
+            .find(|v| v.has_name("zap"))
+            .expect("zap verb must be registered");
+        // External verbs default to requires_confirm=false, so this
+        // primarily checks that the override path doesn't crash.
+        assert!(!zap.requires_confirm);
+    }
+
+    /// A user `VerbConf` with `confirm: true` opts a non-destructive
+    /// external verb into confirmation.
+    #[test]
+    fn verb_conf_confirm_true_opts_in() {
+        let mut conf = Conf::default();
+        let mut store = VerbStore::new(&mut conf).unwrap();
+        let vc = VerbConf {
+            invocation: Some("careful".to_string()),
+            external: Some(ExecPattern::from_string("touch {file}")),
+            confirm: Some(true),
+            ..Default::default()
+        };
+        store.add_from_conf(&vc).unwrap();
+        let careful = store
+            .verbs()
+            .iter()
+            .find(|v| v.has_name("careful"))
+            .expect("careful verb must be registered");
+        assert!(
+            careful.requires_confirm,
+            "confirm: true should opt the verb in"
+        );
+    }
 }

@@ -126,6 +126,14 @@ pub struct Conf {
     #[serde(alias = "auto-open-staging-area")]
     pub auto_open_staging_area: Option<bool>,
 
+    /// User-declared single-character bookmarks for the Goto modal.
+    ///
+    /// `None` (field absent) means the runtime should fall back to the
+    /// built-in defaults. `Some(_)` — even if empty — fully replaces
+    /// the defaults, matching how `verbs` are handled.
+    #[serde(default)]
+    pub bookmarks: Option<Vec<BookmarkConf>>,
+
     pub modal: Option<bool>,
 
     #[serde(alias = "quit-on-last-cancel")]
@@ -251,6 +259,12 @@ impl Conf {
         overwrite!(self, file_sum_threads_count, conf);
         overwrite!(self, max_staged_count, conf);
         overwrite!(self, auto_open_staging_area, conf);
+        // bookmarks: an explicit user list (even empty) replaces previous
+        // values, matching the "verbs/explicit-list-wins" intent. The
+        // generic `overwrite!` macro fits because the field is
+        // `Option<Vec<_>>` and `overwrite_vec!` would *append*, which
+        // would silently merge defaults and user lists across files.
+        overwrite!(self, bookmarks, conf);
         overwrite!(self, show_matching_characters_on_path_searches, conf);
         overwrite!(self, content_search_max_file_size, conf);
         overwrite!(self, terminal_title, conf);
