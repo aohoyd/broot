@@ -139,7 +139,14 @@ impl Areas {
             panel_width = panel_width.max(MINIMAL_PANEL_WIDTH);
         }
         let mut panel_widths = vec![panel_width; nb_pos];
-        panel_widths[nb_pos - 1] = screen_width - (nb_pos as u16 - 1) * panel_width;
+        // The last panel absorbs the rounding remainder of the
+        // screen-width / panel-count division. Use saturating
+        // arithmetic and floor at MINIMAL_PANEL_WIDTH so a tiny screen
+        // (e.g. width 16, 4 panels with the floor of 8 each) cannot
+        // underflow.
+        panel_widths[nb_pos - 1] = screen_width
+            .saturating_sub((nb_pos as u16 - 1) * panel_width)
+            .max(MINIMAL_PANEL_WIDTH);
 
         // adjust panel widths with layout instructions
         if nb_pos > 1 {
@@ -157,7 +164,11 @@ impl Areas {
                         } else {
                             (divider + 1, divider, dx as u16)
                         };
-                        let diff = diff.min(panel_widths[decr] - MINIMAL_PANEL_WIDTH);
+                        // saturating_sub: a width that already fell to (or
+                        // below) the minimum yields 0, so we just refuse
+                        // to shrink the panel further.
+                        let diff = diff
+                            .min(panel_widths[decr].saturating_sub(MINIMAL_PANEL_WIDTH));
                         panel_widths[decr] -= diff;
                         panel_widths[incr] += diff;
                     }
@@ -175,7 +186,13 @@ impl Areas {
                                 let step = diff / (nb_pos as u16 - 1);
                                 for i in 0..nb_pos {
                                     if i != panel {
-                                        let step = step.min(panel_widths[i] - MINIMAL_PANEL_WIDTH);
+                                        // saturating_sub: see the
+                                        // MoveDivider branch above for the
+                                        // same underflow guard.
+                                        let step = step.min(
+                                            panel_widths[i]
+                                                .saturating_sub(MINIMAL_PANEL_WIDTH),
+                                        );
                                         panel_widths[i] -= step;
                                         freed += step;
                                     }
@@ -395,6 +412,25 @@ mod tests {
         // Floor: when the outer is too small for a frame the inner is 0x0.
         assert_eq!(a.state.width, 0);
         assert_eq!(a.state.height, 0);
+    }
+
+    #[test]
+    fn last_panel_width_does_not_underflow_on_tiny_screen() {
+        // 4 panels on a 16-column screen: 16 / 4 = 4, floored to
+        // MINIMAL_PANEL_WIDTH = 8 → panel_width = 8. The original
+        // expression was `screen_width - (n-1)*panel_width`
+        // = 16 - 24 = -8, which used to underflow as u16. Saturating
+        // arithmetic must keep us at MINIMAL_PANEL_WIDTH instead.
+        let areas = Areas::compute_layout(4, &layout(), screen(16, 24), false);
+        assert_eq!(areas.len(), 4);
+        for a in &areas {
+            assert!(
+                a.state_outer.width >= MINIMAL_PANEL_WIDTH,
+                "panel width {} fell below MINIMAL_PANEL_WIDTH {}",
+                a.state_outer.width,
+                MINIMAL_PANEL_WIDTH,
+            );
+        }
     }
 
     #[test]

@@ -13,16 +13,16 @@
 mod confirm;
 mod goto;
 
-pub use confirm::{
-    ConfirmFocus,
-    ConfirmOverlay,
-};
+pub use confirm::ConfirmOverlay;
 pub use goto::GotoOverlay;
+// `ConfirmFocus` is an internal detail of the confirm overlay (the
+// tests inside `confirm.rs` reference it directly via `super::`); it
+// deliberately has no module-level re-export here to keep the public
+// surface tight.
 
 use {
     crate::{
         command::Command,
-        display::W,
         skin::StyleMap,
     },
     crokey::{
@@ -31,7 +31,10 @@ use {
     },
     std::{
         cell::Cell,
-        io,
+        io::{
+            self,
+            Write,
+        },
         path::PathBuf,
     },
     termimad::Area,
@@ -40,49 +43,17 @@ use {
 // =============================================================================
 // shared helpers (used by overlay variants)
 // =============================================================================
+//
+// `io_err` and `truncate_to_width` used to live here as duplicates of
+// the same helpers in `crate::display::frame`. They are now re-exported
+// from there to keep one definition of each. Variants import them
+// through the same `super::{io_err, truncate_to_width}` path they used
+// before, so the call sites are unchanged.
 
-/// Convert a [`termimad::Error`] into an [`std::io::Error`] for use in
-/// the overlay rendering paths. `OverlayState::render` returns
-/// `io::Result<()>` and the styling helpers return `termimad::Error`,
-/// so the variants share this small bridge.
-pub(crate) fn io_err(e: termimad::Error) -> io::Error {
-    match e {
-        termimad::Error::IO(io_e) => io_e,
-        other => io::Error::other(other.to_string()),
-    }
-}
-
-/// Truncate `s` to fit in `max_w` display columns, appending `…` when
-/// it does not fit. Used by both `ConfirmOverlay` and `GotoOverlay` for
-/// body / row text shaping.
-pub(crate) fn truncate_to_width(
-    s: &str,
-    max_w: usize,
-) -> String {
-    if max_w == 0 {
-        return String::new();
-    }
-    let w = unicode_width::UnicodeWidthStr::width(s);
-    if w <= max_w {
-        return s.to_string();
-    }
-    if max_w == 1 {
-        return "…".to_string();
-    }
-    let budget = max_w - 1;
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cw > budget {
-            break;
-        }
-        out.push(ch);
-        used += cw;
-    }
-    out.push('…');
-    out
-}
+pub(crate) use crate::display::frame::{
+    io_err,
+    truncate_to_width,
+};
 
 /// Extension trait for `Cell<Option<T>>` that lets a `&Cell` hand back a
 /// clone of its value while leaving the original in place. Used by the
@@ -114,9 +85,14 @@ pub trait OverlayState {
     /// Paint the overlay onto `w`. `screen` is the full terminal area;
     /// the overlay is responsible for computing its own sub-rectangle
     /// (typically via [`crate::display::frame::centered_rect`]).
-    fn render(
+    ///
+    /// Generic over any `Write` implementation rather than the
+    /// crate-wide `W` alias so unit tests can pass a `BufWriter<Sink>`
+    /// (avoids spurious stderr noise during `cargo test`). At runtime
+    /// `app_panels` still calls this with the production `W`.
+    fn render<Wr: Write>(
         &self,
-        w: &mut W,
+        w: &mut Wr,
         screen: Area,
         palette: &StyleMap,
     ) -> io::Result<()>;
@@ -156,10 +132,12 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    /// Dispatch `render` to the active variant.
-    pub fn render(
+    /// Dispatch `render` to the active variant. Generic over any
+    /// `Write`; at runtime `app_panels` calls this with the production
+    /// `W` (`BufWriter<Stderr>`).
+    pub fn render<Wr: Write>(
         &self,
-        w: &mut W,
+        w: &mut Wr,
         screen: Area,
         palette: &StyleMap,
     ) -> io::Result<()> {
@@ -239,9 +217,9 @@ impl StubOverlay {
 
 #[cfg(test)]
 impl OverlayState for StubOverlay {
-    fn render(
+    fn render<Wr: Write>(
         &self,
-        _w: &mut W,
+        _w: &mut Wr,
         _screen: Area,
         _palette: &StyleMap,
     ) -> io::Result<()> {
@@ -345,7 +323,7 @@ mod tests {
     fn stub_render_increments_counter() {
         let palette = StyleMap::no_term();
         let s = StubOverlay::with_outcome(OverlayOutcome::Stay);
-        let mut buf = std::io::BufWriter::new(std::io::stderr());
+        let mut buf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let area = Area::new(0, 0, 80, 24);
         s.render(&mut buf, area, &palette).unwrap();
         assert_eq!(s.render_count.get(), 1);

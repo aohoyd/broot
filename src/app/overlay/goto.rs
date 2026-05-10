@@ -34,13 +34,10 @@ use {
     },
     crate::{
         app::bookmark::BookmarkEntry,
-        display::{
-            W,
-            frame::{
-                self,
-                FrameStyle,
-                path_label,
-            },
+        display::frame::{
+            self,
+            FrameStyle,
+            path_label,
         },
         skin::StyleMap,
     },
@@ -60,7 +57,10 @@ use {
     },
     std::{
         cell::Cell,
-        io,
+        io::{
+            self,
+            Write,
+        },
     },
     termimad::{
         Area,
@@ -90,9 +90,17 @@ pub struct GotoOverlay {
     pub(crate) selected: usize,
     /// Hit-rects for mouse routing — populated by `render`.
     row_hits: Cell<Option<RowHits>>,
-    /// Scroll offset: index of the first visible entry. Recomputed by
-    /// `render` to keep `selected` in view, and adjusted by the up/down
-    /// handlers when needed.
+    /// Render-time viewport cache: index of the first visible entry.
+    ///
+    /// This is **not** user-driven scroll state — the user navigates
+    /// with `selected` (via arrow keys / Tab); `scroll` is recomputed
+    /// by `render` to clamp the viewport so `selected` stays visible.
+    /// It lives in a `Cell` so the immutable `render(&self, ...)` path
+    /// can update it.
+    ///
+    /// Contrast with `ConfirmOverlay::scroll`, which is genuinely
+    /// user-driven (the up/down handlers move it; the body has no
+    /// independent "selected line" concept).
     scroll: Cell<usize>,
 }
 
@@ -161,9 +169,9 @@ impl GotoOverlay {
 // =============================================================================
 
 impl OverlayState for GotoOverlay {
-    fn render(
+    fn render<Wr: Write>(
         &self,
-        w: &mut W,
+        w: &mut Wr,
         screen: Area,
         palette: &StyleMap,
     ) -> io::Result<()> {
@@ -529,7 +537,7 @@ mod tests {
     fn mouse_on_row_returns_close_and_focus() {
         let mut o = GotoOverlay::new(four_entries());
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o.cached_hits().expect("hits should be cached after render");
@@ -556,7 +564,7 @@ mod tests {
     fn mouse_off_rows_stays() {
         let mut o = GotoOverlay::new(four_entries());
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         // 0,0 — way off the popup
@@ -577,7 +585,7 @@ mod tests {
     fn mouse_non_left_click_stays() {
         let mut o = GotoOverlay::new(four_entries());
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o.cached_hits().unwrap();
@@ -597,14 +605,15 @@ mod tests {
     #[test]
     fn render_writes_corners_title_keys_and_labels() {
         // Drive the real `OverlayState::render` and capture its output
-        // from the `BufWriter<Stderr>` buffer *before* flushing. The
+        // from the `BufWriter<Sink>` buffer *before* flushing. The
         // capture works because `BufWriter::buffer()` exposes the
         // unflushed bytes; we deliberately don't `flush()` so the
-        // bytes remain inspectable.
+        // bytes remain inspectable. Sink backing keeps cargo test's
+        // stderr clean (unflushed bytes never hit a real fd).
         let palette = StyleMap::no_term();
         let o = GotoOverlay::new(four_entries());
         let mut wbuf =
-            std::io::BufWriter::with_capacity(64 * 1024, std::io::stderr());
+            std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let bytes = wbuf.buffer().to_vec();
@@ -627,7 +636,7 @@ mod tests {
     fn render_caches_row_hits() {
         let o = GotoOverlay::new(four_entries());
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         assert!(o.cached_hits().is_none());
         o.render(&mut wbuf, screen, &palette).unwrap();
@@ -651,7 +660,7 @@ mod tests {
         let mut o = GotoOverlay::new(entries);
         o.selected = 15;
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o.cached_hits().unwrap();
@@ -671,7 +680,7 @@ mod tests {
             .collect();
         let o = GotoOverlay::new(entries);
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         let rect = GotoOverlay::compute_rect(&screen, 20);
         assert!(rect.height <= 12, "popup height {} > 12", rect.height);
@@ -717,7 +726,7 @@ mod tests {
     fn empty_entries_renders_without_panic() {
         let o = GotoOverlay::new(vec![]);
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o.cached_hits().unwrap();

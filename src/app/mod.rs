@@ -7,7 +7,7 @@ mod cmd_context;
 mod cmd_result;
 mod display_context;
 mod mode;
-pub mod overlay;
+pub(crate) mod overlay;
 mod panel;
 mod panel_id;
 mod panel_purpose;
@@ -29,7 +29,7 @@ pub use {
     cmd_result::*,
     display_context::*,
     mode::*,
-    overlay::{ConfirmFocus, ConfirmOverlay, GotoOverlay, Overlay, OverlayOutcome, OverlayState},
+    overlay::{ConfirmOverlay, GotoOverlay, Overlay, OverlayOutcome, OverlayState},
     panel::Panel,
     panel_id::PanelId,
     panel_purpose::PanelPurpose,

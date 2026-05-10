@@ -24,6 +24,7 @@ use {
         verb::{
             ExecPattern,
             Internal,
+            PrefixSearchResult,
             VerbStore,
         },
     },
@@ -66,9 +67,16 @@ impl FsCleanup {
 }
 
 impl Drop for FsCleanup {
+    /// Cleanup contract: `add` calls register paths in the order the
+    /// test creates them (children **after** their parent directory).
+    /// `Drop` walks `paths.iter().rev()` so the last-registered path is
+    /// removed first — this guarantees that nested files / directories
+    /// are gone before we attempt `remove_dir_all` (or `remove_file`)
+    /// on their parent. Tests that violate this ordering (e.g. add the
+    /// parent directory before its children) may see "directory not
+    /// empty" cleanup races; `remove_dir_all` masks most of these but
+    /// the documented invariant is "register children before parents".
     fn drop(&mut self) {
-        // Reverse order so a directory's children are removed before
-        // the directory itself.
         for p in self.paths.iter().rev() {
             if p.is_dir() {
                 let _ = std::fs::remove_dir_all(p);
@@ -115,10 +123,16 @@ fn builtin_trash_is_internal() {
 fn user_confirm_false_overrides_builtin_rm() {
     // A user `VerbConf` with the same name as a built-in and
     // `confirm: false` should override `requires_confirm`. The verb
-    // store keeps both the built-in and the user verb (lookup order
-    // depends on registration); the user-defined one (`add_from_conf`
-    // is called before `add_builtin_verbs`) wins on prefix-match if it
-    // shares the name.
+    // store keeps both the built-in and the user verb; user-defined
+    // verbs are registered first (`add_from_conf` runs before
+    // `add_builtin_verbs`) so they win on prefix-match.
+    //
+    // Lookup-order assertion: drive `search_prefix("rm", ...)` and
+    // confirm the verb returned is the user-defined one (confirm=false),
+    // not the built-in (confirm=true). Asserting only "some verb has
+    // confirm=false" — which the previous version of this test did —
+    // would still pass even if the built-in won the prefix lookup,
+    // and would silently regress.
     let mut conf = Conf::default();
     conf.verbs.push(VerbConf {
         invocation: Some("rm".to_string()),
@@ -127,13 +141,34 @@ fn user_confirm_false_overrides_builtin_rm() {
         ..Default::default()
     });
     let store = VerbStore::new(&mut conf).unwrap();
-    // The user-defined `rm` (registered first) has confirm=false.
-    let user_rm = store
+    match store.search_prefix("rm", None) {
+        PrefixSearchResult::Match(_, verb) => {
+            assert!(
+                !verb.requires_confirm,
+                "user `rm` with confirm=false must win the prefix lookup; \
+                 builtin (requires_confirm=true) leaked through",
+            );
+        }
+        other => panic!(
+            "expected exact-match for `rm`, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+
+    // Defence-in-depth: the user verb must also appear before any
+    // remaining built-in `rm` in the verbs list. If this property
+    // breaks (e.g. registration order changes) the prefix lookup above
+    // would silently start returning the wrong verb.
+    let first_rm_idx = store
         .verbs()
         .iter()
-        .find(|v| v.has_name("rm") && !v.requires_confirm)
-        .expect("user-overridden rm with confirm=false must exist");
-    assert!(!user_rm.requires_confirm);
+        .position(|v| v.has_name("rm"))
+        .expect("at least one `rm` verb must exist");
+    assert!(
+        !store.verbs()[first_rm_idx].requires_confirm,
+        "the first `rm` in the verbs list must be the user override, \
+         not the built-in",
+    );
 }
 
 #[test]

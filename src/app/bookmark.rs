@@ -179,7 +179,14 @@ fn default_bookmarks() -> Vec<BookmarkEntry> {
 fn materialise<I: IntoIterator<Item = BookmarkConf>>(items: I) -> Vec<BookmarkEntry> {
     let mut out: Vec<BookmarkEntry> = Vec::new();
     for conf in items {
-        if out.iter().any(|e| e.key == conf.key) {
+        // Duplicate detection must be case-insensitive to mirror the
+        // case-insensitive lookup in `GotoOverlay::handle_key` (Shift+H
+        // matches the `h` bookmark, etc). Otherwise a user could bind
+        // both `h` and `H` and the `H` entry would be unreachable.
+        if out
+            .iter()
+            .any(|e| chars_eq_ignore_ascii_case(e.key, conf.key))
+        {
             warn!(
                 "duplicate bookmark key {:?} (path {:?}); keeping first definition",
                 conf.key, conf.path
@@ -199,6 +206,21 @@ fn materialise<I: IntoIterator<Item = BookmarkConf>>(items: I) -> Vec<BookmarkEn
         });
     }
     out
+}
+
+/// ASCII-case-insensitive char equality. Mirrors `str::eq_ignore_ascii_case`
+/// at the single-char level: bookmark keys are routinely letters, and
+/// the goto modal already matches them case-insensitively, so duplicate
+/// detection here must use the same rule.
+fn chars_eq_ignore_ascii_case(
+    a: char,
+    b: char,
+) -> bool {
+    let mut buf_a = [0u8; 4];
+    let mut buf_b = [0u8; 4];
+    let s_a = a.encode_utf8(&mut buf_a);
+    let s_b = b.encode_utf8(&mut buf_b);
+    s_a.eq_ignore_ascii_case(s_b)
 }
 
 fn label_for(
@@ -340,13 +362,39 @@ mod tests {
     }
 
     #[test]
-    fn malformed_bookmark_conf_drops_dropped_entries_silently() {
+    fn empty_path_bookmark_conf_is_dropped_silently() {
         // Empty path -> resolve returns None -> entry dropped, no panic.
-        // Other entries in the same list survive intact.
+        // Other entries in the same list survive intact. This pins the
+        // in-memory drop behaviour for `materialise`; for the on-disk
+        // deserialization-failure path see
+        // `malformed_bookmark_hjson_returns_deser_error` below.
         let confs = [bm('a', ""), bm('b', "/tmp/some_path")];
         let bookmarks = build_bookmarks(Some(&confs));
         assert_eq!(bookmarks.len(), 1, "empty-path entry must be dropped");
         assert_eq!(bookmarks[0].key, 'b');
+    }
+
+    #[test]
+    fn malformed_bookmark_hjson_returns_deser_error() {
+        // Pin the deserialization-error path: a `bookmarks` entry that
+        // omits the required `path` field must surface a deser failure
+        // rather than silently producing a bogus entry. This is the
+        // on-disk counterpart of the in-memory drop path covered by
+        // `empty_path_bookmark_conf_is_dropped_silently` — the two
+        // tests together prove malformed input never reaches
+        // `materialise` as a half-built struct.
+        let hjson = r#"{
+            bookmarks: [
+                { key: 'h' }
+            ]
+        }"#;
+        let res: Result<crate::conf::Conf, _> = deser_hjson::from_str(hjson);
+        assert!(
+            res.is_err(),
+            "missing `path` must be a deserialization error, \
+             got {:?}",
+            res.map(|c| c.bookmarks),
+        );
     }
 
     #[test]
@@ -377,6 +425,25 @@ mod tests {
         let confs = [bm('h', "/foo"), bm('h', "/bar")];
         let bookmarks = build_bookmarks(Some(&confs));
         assert_eq!(bookmarks.len(), 1, "duplicate keys collapse to one entry");
+        assert_eq!(bookmarks[0].key, 'h');
+        assert_eq!(bookmarks[0].path, PathBuf::from("/foo"));
+    }
+
+    #[test]
+    fn duplicate_keys_are_detected_case_insensitively() {
+        // Goto's single-char-jump dispatch matches keys
+        // case-insensitively (Shift+H jumps to the `h` bookmark). If
+        // duplicate detection here used `==` instead of an
+        // ASCII-case-insensitive comparison, a user could legally bind
+        // both `h` and `H` — and the second binding would be dead code,
+        // unreachable from the modal. Pin the case-insensitive policy.
+        let confs = [bm('h', "/foo"), bm('H', "/bar")];
+        let bookmarks = build_bookmarks(Some(&confs));
+        assert_eq!(
+            bookmarks.len(),
+            1,
+            "lowercase + uppercase of the same letter must collapse",
+        );
         assert_eq!(bookmarks[0].key, 'h');
         assert_eq!(bookmarks[0].path, PathBuf::from("/foo"));
     }

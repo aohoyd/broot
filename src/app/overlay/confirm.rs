@@ -30,12 +30,9 @@ use {
     },
     crate::{
         command::Command,
-        display::{
-            W,
-            frame::{
-                self,
-                FrameStyle,
-            },
+        display::frame::{
+            self,
+            FrameStyle,
         },
         skin::StyleMap,
     },
@@ -54,7 +51,10 @@ use {
     },
     std::{
         cell::Cell,
-        io,
+        io::{
+            self,
+            Write,
+        },
     },
     termimad::{
         Area,
@@ -63,8 +63,11 @@ use {
 };
 
 /// Which button currently has keyboard focus.
+///
+/// Crate-internal: the overlay's focus state is an implementation
+/// detail of the overlay layer, not part of the public surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfirmFocus {
+pub(crate) enum ConfirmFocus {
     Cancel,
     Confirm,
 }
@@ -149,9 +152,9 @@ impl ConfirmOverlay {
 // =============================================================================
 
 impl OverlayState for ConfirmOverlay {
-    fn render(
+    fn render<Wr: Write>(
         &self,
-        w: &mut W,
+        w: &mut Wr,
         screen: Area,
         palette: &StyleMap,
     ) -> io::Result<()> {
@@ -506,14 +509,29 @@ mod tests {
         }
         let palette = StyleMap::no_term();
         let mut wbuf =
-            std::io::BufWriter::with_capacity(64 * 1024, std::io::stderr());
+            std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let bytes = wbuf.buffer().to_vec();
         let s = String::from_utf8_lossy(&bytes);
-        // After scrolling, a later line must appear in the rendered
-        // bytes. We tolerate any single late line being visible.
-        let any_late = (12..28).any(|i| s.contains(&format!("UNIQUE_LINE_{i}")));
+        // Compute the post-scroll visible window explicitly so the
+        // assertion fails loudly if the geometry changes:
+        //   want_h = body.len()+5 capped at 15 → 15
+        //   visible_body_rows = 15 - 4 = 11
+        //   scroll = 15 (15 ↓ presses, clamped to max_scroll = 30-11 = 19)
+        //   visible range = [15, 26).
+        //
+        // The last visible row can be ellipsis-truncated when the body
+        // overflows ("UNIQUE_LINE_25 …"). To keep the assertion
+        // robust we exclude index 25 — the line immediately before
+        // (index 24) is rendered in full, which is enough to prove
+        // scrolling actually happened. The original `(12..28)` window
+        // both included indices that should never appear (≤14, ≥26)
+        // and silently tolerated breakages within them.
+        let visible_first = 15;
+        let visible_last_full = 24; // exclusive bound 25 (ellipsis row).
+        let any_late =
+            (visible_first..visible_last_full + 1).any(|i| s.contains(&format!("UNIQUE_LINE_{i}")));
         assert!(
             any_late,
             "expected a post-scroll body line in render bytes; got: {s:?}",
@@ -549,13 +567,13 @@ mod tests {
 
     #[test]
     fn mouse_on_confirm_runs_command() {
-        // The trait `render` writes to a real `W = BufWriter<Stderr>`,
-        // which is a side-effect we don't observe in tests; we only
-        // need the *cached hit-rects* it produces. The bytes go to
-        // stderr, harmless for `cargo test`.
+        // The trait `render` writes to a `BufWriter<Sink>` here so the
+        // bytes are discarded entirely — tests don't observe them, and
+        // cargo's stderr stays clean. We only need the *cached
+        // hit-rects* the render path populates as a side effect.
         let mut o = make(vec!["/tmp/x"], false);
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o
@@ -572,7 +590,7 @@ mod tests {
     fn mouse_on_cancel_closes() {
         let mut o = make(vec!["/tmp/x"], false);
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o.button_hits.get_cloned().unwrap();
@@ -586,7 +604,7 @@ mod tests {
     fn mouse_off_buttons_stays() {
         let mut o = make(vec!["/tmp/x"], false);
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         // top-left corner of screen is well outside both button rects.
@@ -598,7 +616,7 @@ mod tests {
     fn mouse_non_left_click_stays() {
         let mut o = make(vec!["/tmp/x"], false);
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let hits = o.button_hits.get_cloned().unwrap();
@@ -629,16 +647,18 @@ mod tests {
     #[test]
     fn render_writes_corners_and_title_and_buttons() {
         // Drive the real `OverlayState::render` and capture its output
-        // from the `BufWriter<Stderr>` buffer *before* flushing. This
-        // is the actual render path, not a sidecar buffer mimicking it.
+        // from the `BufWriter<Sink>` buffer *before* flushing. This is
+        // the actual render path, not a sidecar buffer mimicking it.
         // The capture works because `BufWriter::buffer()` returns a
         // borrow of unflushed bytes — we simply skip the `flush` call.
+        // Backing the buffer with `sink()` keeps cargo test's stderr
+        // free of noise (unflushed bytes never reach a real fd).
         let palette = StyleMap::no_term();
         let o = make(vec!["/tmp/a", "/tmp/b"], false);
         // 64 KiB is comfortably larger than the 80x24 modal output, so
         // the buffer never auto-flushes during the render.
         let mut wbuf =
-            std::io::BufWriter::with_capacity(64 * 1024, std::io::stderr());
+            std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let screen = Area::new(0, 0, 80, 24);
         o.render(&mut wbuf, screen, &palette).unwrap();
         let bytes = wbuf.buffer().to_vec();
@@ -661,7 +681,7 @@ mod tests {
     #[test]
     fn render_caches_button_hits() {
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let o = make(vec!["/tmp/a"], false);
         let screen = Area::new(0, 0, 80, 24);
         assert!(o.button_hits.get_cloned().is_none());
@@ -686,7 +706,7 @@ mod tests {
         // 30 lines of body, screen 24 rows — height clamps to 15.
         let body: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
         let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::new(std::io::stderr());
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let o = ConfirmOverlay::new("t", body, "OK", false, cmd());
         let screen = Area::new(0, 0, 80, 24);
         // Should not panic, should populate hits.

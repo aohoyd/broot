@@ -148,8 +148,11 @@ literals users start from when they uncomment, and they must stay in
 sync.
 
 Duplicate-key policy: first definition wins, later duplicates are
-dropped with `cli_log::warn!` (`src/app/bookmark.rs:163-168`).
-Ordering in the user list is therefore load-bearing.
+dropped with `cli_log::warn!` (`src/app/bookmark.rs::materialise`,
+the `out.iter().any(...)` guard near the top of the loop). The
+comparison is ASCII-case-insensitive, mirroring the goto modal's
+case-insensitive single-char jump dispatch — so `h` and `H` are not
+both bindable. Ordering in the user list is therefore load-bearing.
 
 ## Icon defaults
 

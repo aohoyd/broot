@@ -104,13 +104,13 @@ Here's chmod:
 
 Destructive verbs (`:rm`, `:trash`) now prompt for confirmation before
 running. `:cp` and `:mv` prompt when the destination already exists,
-and bulk operations on the [staging area](staging-area) confirm the
-fan-out count before fanning out.
+and bulk operations on the staging area confirm the fan-out count
+before fanning out.
 
 You can opt your own external verbs into this prompt with
 `confirm: true` in `conf.hjson`, or opt the built-ins out with
 `confirm: false`. The `confirm` field sits next to `auto_exec` in the
-verb block (see [Verb definition attributes](#verb-definition-attributes)
+verb block (see [Verb definition attributes](https://dystroy.org/broot/conf_verbs/#verb-definition-attributes)
 on the docs site).
 
 ## Goto bookmarks
@@ -131,10 +131,11 @@ Because `g` is also a regular fuzzy-match character, broot installs
 this binding on the **internal verb** `:goto_bookmarks`, not on the
 input row — so typing `g` as part of a search filter while the input
 has focus still works. If you want to free `g` for a different
-shortcut, add an unbinding in your `conf.hjson`:
+shortcut, add an entry that binds the key to nothing (no execution
+fields — neither `internal` nor `external`) in your `conf.hjson`:
 
 ```hjson
-{ key: g, internal: ":goto_bookmarks", invocation: false }
+{ key: g }
 ```
 
 Customize the bookmark list with a `bookmarks` block in `conf.hjson`
@@ -146,8 +147,8 @@ Nerd Font icons are **on by default**. Earlier broot versions
 shipped with no icons; users upgrading from those versions will see
 unfamiliar glyph columns. If your terminal does not have a Nerd Font
 installed, set `icon_theme: none` in `conf.hjson` to restore the
-previous behaviour. See [icons.md](website/src/icons.md) for
-installation guidance.
+previous behaviour. See [the icons page](https://dystroy.org/broot/icons)
+for installation guidance.
 
 ## Icons
 

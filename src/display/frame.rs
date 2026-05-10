@@ -207,7 +207,11 @@ pub(crate) fn centered_rect(
 
 // ---- private helpers ------------------------------------------------------
 
-fn io_err(e: termimad::Error) -> io::Error {
+/// Convert a [`termimad::Error`] into an [`std::io::Error`]. Used by
+/// every renderer that bridges termimad styling output into an
+/// `io::Result`. Crate-public so the overlay layer can reuse this
+/// instead of duplicating the body.
+pub(crate) fn io_err(e: termimad::Error) -> io::Error {
     match e {
         termimad::Error::IO(io_e) => io_e,
         other => io::Error::other(other.to_string()),
@@ -260,7 +264,10 @@ fn home_dir_string() -> Option<String> {
 
 /// Truncate `s` to fit in `max_w` display columns. If truncation occurs,
 /// the result ends with `…`.
-fn truncate_to_width(
+///
+/// Crate-public so the overlay layer can reuse this instead of
+/// duplicating the body.
+pub(crate) fn truncate_to_width(
     s: &str,
     max_w: usize,
 ) -> String {
