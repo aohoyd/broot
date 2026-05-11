@@ -238,6 +238,18 @@ impl VerbStore {
             StayInBroot,
         )
         .with_shortcut("mvp");
+        // `bulk_rename` is registered BEFORE the external `rename` verb
+        // (which also binds F2) so that `find_key_verb` — which scans
+        // verbs in registration order and returns the first match —
+        // resolves F2 to the internal first. The internal is the
+        // context-aware entry point: with a stage of 0-1 paths it falls
+        // through to the inline rename via a synthesized
+        // `Command::VerbTrigger`; with 2+ it drives the $EDITOR-backed
+        // bulk flow. The continuation `bulk_rename_apply` is NOT bound
+        // to any key — it is only ever reached from the confirm
+        // overlay's `CloseAndRun` path.
+        self.add_internal(bulk_rename).with_key(key!(f2));
+        self.add_internal(bulk_rename_apply).no_doc();
         #[cfg(unix)]
         self.add_external(
             "rename {new_filename:file-name}",
@@ -802,6 +814,60 @@ mod confirm_tests {
         assert!(
             careful.requires_confirm,
             "confirm: true should opt the verb in"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bulk_rename_routing_tests {
+    use {
+        super::*,
+        crokey::key,
+    };
+
+    /// `find_key_verb` returns verbs in registration order. Both the
+    /// `bulk_rename` internal and the external `rename` verb bind F2;
+    /// the internal must be registered first so it wins the lookup.
+    /// This test asserts that ordering invariant — if someone reorders
+    /// the registrations and the external `rename` ends up first, F2
+    /// would silently switch to the inline-only flow.
+    #[test]
+    fn f2_resolves_to_internal_bulk_rename_before_external_rename() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let f2 = key!(f2);
+        let first_f2_verb = store
+            .verbs()
+            .iter()
+            .find(|v| v.keys.contains(&f2))
+            .expect("at least one verb must bind F2");
+        assert_eq!(
+            first_f2_verb.get_internal(),
+            Some(Internal::bulk_rename),
+            "F2 must resolve to Internal::bulk_rename first; \
+             check the registration order in add_builtin_verbs",
+        );
+    }
+
+    /// The continuation `bulk_rename_apply` is intentionally unbound:
+    /// it should only be reachable via the confirm overlay's
+    /// `CloseAndRun` re-dispatch. If anyone binds it to a key by
+    /// accident, the user could end up calling it with no
+    /// `pending_bulk_rename` set, which would surface as a status-row
+    /// error rather than silent breakage — but we'd rather catch the
+    /// mistake at registration time.
+    #[test]
+    fn bulk_rename_apply_has_no_key_binding() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let apply = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::bulk_rename_apply))
+            .expect("bulk_rename_apply must be registered");
+        assert!(
+            apply.keys.is_empty(),
+            "bulk_rename_apply must not bind any key",
         );
     }
 }

@@ -25,7 +25,9 @@
 
 use {
     std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
+        fs,
+        io,
         path::{Path, PathBuf},
     },
 };
@@ -205,6 +207,53 @@ pub fn plan(
         .collect();
 
     Ok(RenameRun { renames })
+}
+
+/// Execute the validated renames on the real filesystem in two phases.
+///
+/// Phase 1 walks `run.renames` in order. When a target path already
+/// exists *and* is itself one of the source paths (i.e. a cycle, e.g.
+/// `a → b, b → a`), the source is renamed to `<source>.broot-bulk-tmp-{idx}`
+/// and a `(temp, target)` entry is queued for phase 2. Otherwise the
+/// rename runs directly.
+///
+/// Phase 2 walks the queued temps and renames each one onto its final
+/// target. By construction every target in phase 2 is free (its
+/// original occupant was moved to a temp in phase 1).
+///
+/// Failure semantics: on the first `fs::rename` error, return
+/// `Err((path, io::Error))` immediately. Entries before the failure
+/// stay applied — there is no rollback. The caller surfaces the path
+/// and the error to the status row. Phase-1 temp entries that survive
+/// a phase-2 failure are NOT cleaned up; they remain on disk under
+/// their `.broot-bulk-tmp-{idx}` names.
+pub fn apply(run: &RenameRun) -> Result<(), (PathBuf, io::Error)> {
+    let from_set: HashSet<PathBuf> = run.renames.iter().map(|(f, _)| f.clone()).collect();
+    let mut second_phase: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (idx, (from, to)) in run.renames.iter().enumerate() {
+        if to.exists() && from_set.contains(to) {
+            // Cycle: rename `from` to a sibling temp file, queue the
+            // (temp, to) pair for phase 2. The temp name is derived
+            // from `from` (not `to`) so two cycle pairs cannot pick
+            // the same temp; the `{idx}` suffix is additional defense.
+            let mut tmp = from.clone();
+            let stem = tmp
+                .file_name()
+                .map(|s| s.to_os_string())
+                .unwrap_or_default();
+            let mut name = stem;
+            name.push(format!(".broot-bulk-tmp-{idx}"));
+            tmp.set_file_name(name);
+            fs::rename(from, &tmp).map_err(|e| (from.clone(), e))?;
+            second_phase.push((tmp, to.clone()));
+        } else {
+            fs::rename(from, to).map_err(|e| (from.clone(), e))?;
+        }
+    }
+    for (tmp, to) in second_phase {
+        fs::rename(&tmp, &to).map_err(|e| (tmp.clone(), e))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -389,5 +438,107 @@ mod tests {
             collision.to_string(),
             "bulk rename: target `/tmp/b` already exists",
         );
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use {
+        super::*,
+        std::fs as stdfs,
+    };
+
+    /// Three real files, three real renames; assert each lands at the
+    /// expected post-rename path. Exercises the non-cycle phase-1 fast
+    /// path of `apply`.
+    #[test]
+    fn apply_happy_path_renames_three_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let a = dir.join("a");
+        let b = dir.join("b");
+        let c = dir.join("c");
+        stdfs::write(&a, b"A").unwrap();
+        stdfs::write(&b, b"B").unwrap();
+        stdfs::write(&c, b"C").unwrap();
+
+        let run = RenameRun {
+            renames: vec![
+                (a.clone(), dir.join("a1")),
+                (b.clone(), dir.join("b1")),
+                (c.clone(), dir.join("c1")),
+            ],
+        };
+        apply(&run).expect("apply must succeed");
+
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!c.exists());
+        assert_eq!(stdfs::read(dir.join("a1")).unwrap(), b"A");
+        assert_eq!(stdfs::read(dir.join("b1")).unwrap(), b"B");
+        assert_eq!(stdfs::read(dir.join("c1")).unwrap(), b"C");
+    }
+
+    /// Two files `a` and `b`, rename them onto each other. The
+    /// two-phase code path must move both to a temp and back to land
+    /// at the swapped names with their contents preserved.
+    #[test]
+    fn apply_swaps_two_files_via_two_phase() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let a = dir.join("a");
+        let b = dir.join("b");
+        stdfs::write(&a, b"A").unwrap();
+        stdfs::write(&b, b"B").unwrap();
+
+        let run = RenameRun {
+            renames: vec![
+                (a.clone(), b.clone()),
+                (b.clone(), a.clone()),
+            ],
+        };
+        apply(&run).expect("cycle apply must succeed");
+
+        // After swap: file at path `a` has content "B", path `b` has "A".
+        assert_eq!(stdfs::read(&a).unwrap(), b"B");
+        assert_eq!(stdfs::read(&b).unwrap(), b"A");
+    }
+
+    /// Three files; middle target points into a non-existent directory
+    /// so the rename fails. Assert the first rename stayed applied and
+    /// the third was not attempted (its source still exists at the
+    /// original name). The returned error must name the failed source.
+    #[test]
+    fn apply_partial_failure_stops_at_first_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let a = dir.join("a");
+        let b = dir.join("b");
+        let c = dir.join("c");
+        stdfs::write(&a, b"A").unwrap();
+        stdfs::write(&b, b"B").unwrap();
+        stdfs::write(&c, b"C").unwrap();
+
+        // Middle rename targets a path inside a non-existent dir.
+        let bad_target = dir.join("missing_dir/b1");
+        let run = RenameRun {
+            renames: vec![
+                (a.clone(), dir.join("a1")),
+                (b.clone(), bad_target.clone()),
+                (c.clone(), dir.join("c1")),
+            ],
+        };
+        let err = apply(&run).expect_err("middle rename must fail");
+        let (failed_path, _io_err) = err;
+        assert_eq!(failed_path, b);
+
+        // First rename applied.
+        assert!(!a.exists());
+        assert_eq!(stdfs::read(dir.join("a1")).unwrap(), b"A");
+        // Middle source still there (rename failed before move).
+        assert_eq!(stdfs::read(&b).unwrap(), b"B");
+        // Third never attempted.
+        assert_eq!(stdfs::read(&c).unwrap(), b"C");
+        assert!(!dir.join("c1").exists());
     }
 }

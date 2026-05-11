@@ -2,6 +2,7 @@ use {
     super::*,
     crate::{
         browser::BrowserState,
+        bulk_rename,
         cli::TriBool,
         command::{
             Command,
@@ -24,7 +25,10 @@ use {
             Either,
         },
         terminal,
-        verb::Internal,
+        verb::{
+            Internal,
+            VerbId,
+        },
         watcher::Watcher,
     },
     crokey::crossterm::event::Event,
@@ -81,6 +85,15 @@ pub struct App {
     /// allowing the post-confirmation re-dispatch to actually run the
     /// destructive action. Reset to `false` after each consult.
     skip_confirm: bool,
+
+    /// Payload field for the bulk-rename flow: the validated
+    /// [`bulk_rename::RenameRun`] is stashed here while the user reviews
+    /// the diff in a `ConfirmOverlay`. On confirm the overlay returns
+    /// `CloseAndRun(:bulk_rename_apply)`, the apply handler `mem::take`s
+    /// this slot and runs `bulk_rename::apply`. Mirrors the
+    /// `skip_confirm` "single-field, single-consumer" discipline — no
+    /// `Command` enum payload changes.
+    pending_bulk_rename: Option<bulk_rename::RenameRun>,
 }
 
 impl App {
@@ -118,6 +131,7 @@ impl App {
             watcher,
             overlay: None,
             skip_confirm: false,
+            pending_bulk_rename: None,
         })
     }
 
@@ -189,6 +203,40 @@ impl App {
             }
         }
         self.skip_confirm = false;
+
+        // Bulk-rename intercept. Two internals fire at the App level —
+        // they need to read `app_state.stage`, drive the external
+        // editor, and open an overlay, none of which fit neatly into
+        // a `PanelState::on_internal` arm. Both legs return early so
+        // the panel layer never sees these commands.
+        //
+        //   `Internal::bulk_rename`       — F2 entry point. Stage < 2:
+        //                                    fall through to the inline
+        //                                    rename external verb.
+        //                                    Stage ≥ 2: run the editor,
+        //                                    plan, open ConfirmOverlay.
+        //   `Internal::bulk_rename_apply` — re-entered from the confirm
+        //                                    overlay's `CloseAndRun`.
+        //                                    Consumes `pending_bulk_rename`
+        //                                    and runs `bulk_rename::apply`.
+        if let Some(internal) = resolved_internal(cmd, con) {
+            match internal {
+                Internal::bulk_rename => {
+                    if is_input_invocation {
+                        self.panels.clear_input_invocation(con);
+                    }
+                    return self.run_bulk_rename(w, panel_skin, app_state, con);
+                }
+                Internal::bulk_rename_apply => {
+                    if is_input_invocation {
+                        self.panels.clear_input_invocation(con);
+                    }
+                    self.run_bulk_rename_apply(app_state, con);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
 
         let cmd_result = self
             .panels
@@ -646,8 +694,13 @@ impl App {
         };
         // Skip stage-management internals — these manipulate the
         // staging area itself rather than acting on the staged paths.
+        // Also skip the bulk-rename internals: they have their own
+        // multi-file flow (diff modal + apply) and must not surface a
+        // generic "Run :bulk_rename on N files?" confirm.
         if let Some(internal) = verb.get_internal() {
-            if is_stage_management_internal(internal) {
+            if is_stage_management_internal(internal)
+                || matches!(internal, Internal::bulk_rename | Internal::bulk_rename_apply)
+            {
                 return None;
             }
         }
@@ -661,6 +714,143 @@ impl App {
         let confirm_label = verb_confirm_label(&name);
         let danger = verb.requires_confirm;
         Some((title, body, confirm_label, danger))
+    }
+
+    /// Run the bulk-rename entry leg. Drives the user through the
+    /// $EDITOR → parse → plan → confirm-overlay pipeline. Falls through
+    /// to the inline `rename` external when the stage has fewer than
+    /// two paths so the same key (F2) still surfaces the existing
+    /// single-file rename.
+    ///
+    /// Failure modes surface to the status row and return `Ok(())`;
+    /// a hard panic is never appropriate for any user-driven error
+    /// here (editor missing, parse failure, validation failure, fs
+    /// error during the editor's read-back, etc.).
+    fn run_bulk_rename(
+        &mut self,
+        w: &mut W,
+        panel_skin: &PanelSkin,
+        app_state: &mut AppState,
+        con: &mut AppContext,
+    ) -> Result<(), ProgramError> {
+        let stage_paths = app_state.stage.paths().to_vec();
+        if stage_paths.len() < 2 {
+            // Fall through to the inline rename external verb. We
+            // resolve it by name and synthesize a `Command::VerbTrigger`
+            // so the verb's existing arg-prompt flow fires unchanged.
+            // If the external isn't registered (custom user conf), we
+            // surface an empty-stage hint instead of silently swallowing
+            // the keypress.
+            if let Some(verb_id) = self.find_external_rename_verb_id(con) {
+                let cmd = Command::VerbTrigger {
+                    verb_id,
+                    input_invocation: None,
+                };
+                return self.apply_command(w, &cmd, panel_skin, app_state, con);
+            } else {
+                self.panels.mut_panel().set_error(
+                    "bulk rename: stage 2+ files to use the bulk flow".to_string(),
+                );
+                return Ok(());
+            }
+        }
+
+        let content = bulk_rename::serialize(&stage_paths);
+        let edited = match editor::edit_in_external(&content, ".broot-rename") {
+            Ok(s) => s,
+            Err(e) => {
+                self.panels.mut_panel().set_error(format!("bulk rename: {e}"));
+                return Ok(());
+            }
+        };
+        let parsed = bulk_rename::parse(&edited);
+        let run = match bulk_rename::plan(&stage_paths, &parsed, &|p| p.exists()) {
+            Ok(r) => r,
+            Err(e) => {
+                self.panels.mut_panel().set_error(e.to_string());
+                return Ok(());
+            }
+        };
+        if run.renames.is_empty() {
+            self.panels.mut_panel().set_message("bulk rename: no changes".to_string());
+            return Ok(());
+        }
+
+        let count = run.renames.len();
+        let body: Vec<String> = run
+            .renames
+            .iter()
+            .map(|(from, to)| format!("{} → {}", from.display(), to.display()))
+            .collect();
+        let title = if count == 1 {
+            "Rename 1 file?".to_string()
+        } else {
+            format!("Rename {count} files?")
+        };
+        self.pending_bulk_rename = Some(run);
+        self.request_confirm(
+            title,
+            body,
+            "Rename",
+            false,
+            Command::from_raw(":bulk_rename_apply".to_string(), true),
+        );
+        Ok(())
+    }
+
+    /// Apply the validated `pending_bulk_rename`. Errors surface to the
+    /// status row; on success the stage is cleared and the active panel
+    /// is refreshed so the tree picks up the new names. Partial failure
+    /// leaves the renames that succeeded before the failure in place
+    /// (mirrors `bulk_rename::apply`'s "no rollback" contract).
+    fn run_bulk_rename_apply(
+        &mut self,
+        app_state: &mut AppState,
+        con: &AppContext,
+    ) {
+        let Some(run) = self.pending_bulk_rename.take() else {
+            self.panels.mut_panel().set_error(
+                "bulk rename: nothing pending".to_string(),
+            );
+            return;
+        };
+        match bulk_rename::apply(&run) {
+            Ok(()) => {
+                app_state.stage.clear();
+                clear_caches();
+                self.panels.refresh_all_panels(con);
+                self.panels.mut_panel().set_message(format!(
+                    "renamed {} file{}",
+                    run.renames.len(),
+                    if run.renames.len() == 1 { "" } else { "s" },
+                ));
+            }
+            Err((path, err)) => {
+                self.panels.mut_panel().set_error(format!(
+                    "bulk rename failed at {}: {}",
+                    path.display(),
+                    err,
+                ));
+                // Some renames may have applied before the failure;
+                // refresh anyway so the tree reflects current truth.
+                clear_caches();
+                self.panels.refresh_all_panels(con);
+            }
+        }
+    }
+
+    /// Look up the built-in external `rename` verb's ID so the
+    /// stage-size-<2 fall-through can synthesize a `VerbTrigger` that
+    /// runs the existing inline-rename flow. The verb is identified by
+    /// name "rename" AND being external (not internal) — distinguishes
+    /// it from the F2 internal `bulk_rename` we just added.
+    fn find_external_rename_verb_id(&self, con: &AppContext) -> Option<VerbId> {
+        for verb in con.verb_store.verbs() {
+            if verb.has_name("rename") && verb.get_internal().is_none() {
+                return Some(verb.id);
+            }
+        }
+        None
     }
 
     /// Translate an `OverlayOutcome` returned by the overlay's event
@@ -1073,6 +1263,34 @@ fn resolve_overwrite_target(
         return None;
     }
     Some(target)
+}
+
+/// Resolve a `Command` to its target `Internal`, if any. Used by the
+/// bulk-rename intercept in `App::apply_command` to detect both
+/// `Internal::bulk_rename` (F2 trigger or `:bulk_rename` typed) and
+/// `Internal::bulk_rename_apply` (only ever produced by the confirm
+/// overlay's `CloseAndRun` re-dispatch).
+///
+/// Three command shapes can resolve to an internal:
+///   * `Command::Internal { internal, .. }` — direct.
+///   * `Command::VerbTrigger { verb_id, .. }` — the verb may carry an
+///     internal execution.
+///   * `Command::VerbInvocate(invocation)` — looked up by name in the
+///     verb store; the matched verb may carry an internal execution.
+fn resolved_internal(cmd: &Command, con: &AppContext) -> Option<Internal> {
+    match cmd {
+        Command::Internal { internal, .. } => Some(*internal),
+        Command::VerbTrigger { verb_id, .. } => {
+            con.verb_store.verb(*verb_id).get_internal()
+        }
+        Command::VerbInvocate(invocation) => con
+            .verb_store
+            .verbs()
+            .iter()
+            .find(|v| v.has_name(&invocation.name))
+            .and_then(|v| v.get_internal()),
+        _ => None,
+    }
 }
 
 /// Whether an internal verb is a stage-management action (i.e. it
@@ -1701,5 +1919,141 @@ mod confirm_helper_tests {
         let body = bulk_stage_body(&paths);
         assert_eq!(body.len(), 32);
         assert!(!body.last().unwrap().contains("more"));
+    }
+}
+
+#[cfg(test)]
+mod bulk_rename_routing_tests {
+    //! Routing decisions for the App-level bulk-rename intercept.
+    //!
+    //! Constructing a full `App` for an integration-style test pulls
+    //! in screen + verb-store + event-source plumbing that isn't worth
+    //! mocking; instead these tests pin the two routing helpers that
+    //! the intercept relies on:
+    //!
+    //!   * `resolved_internal` — converts any Command shape into the
+    //!     internal it would dispatch to, so the intercept can pick
+    //!     up `bulk_rename` / `bulk_rename_apply` regardless of how
+    //!     the user invoked them (F2 trigger, `:bulk_rename` typed,
+    //!     `Command::Internal` synthesised from a sequence).
+    //!   * Stage-size branching for `bulk_rename` — exercised
+    //!     declaratively via a stage-length predicate, matching the
+    //!     `stage.len() < 2` rule used in `run_bulk_rename`.
+
+    use {
+        super::*,
+        crate::{
+            conf::{Conf, parse_default_flags},
+            verb::{VerbInvocation, VerbStore},
+        },
+    };
+
+    /// Construct a fresh AppContext-shaped stand-in: just the verb
+    /// store, which is all `resolved_internal` consults.
+    fn fresh_store() -> VerbStore {
+        let mut conf = Conf::default();
+        VerbStore::new(&mut conf).expect("default verb store")
+    }
+
+    /// Helper: assemble a real AppContext from defaults. Mirrors the
+    /// `context_with_icon_theme` helper in `app_context.rs`'s test
+    /// module — we use the same machinery so the verb-store the test
+    /// inspects is the production one, not a hand-rolled stub.
+    fn make_app_context() -> crate::app::AppContext {
+        let mut config = Conf::default();
+        let verb_store = VerbStore::new(&mut config).unwrap();
+        let launch_args = parse_default_flags("").unwrap();
+        crate::app::AppContext::from(launch_args, verb_store, &config)
+            .expect("AppContext::from must succeed with defaults")
+    }
+
+    #[test]
+    fn resolved_internal_recognises_command_internal_directly() {
+        let con = make_app_context();
+        let cmd = Command::Internal {
+            internal: Internal::bulk_rename,
+            input_invocation: None,
+        };
+        assert_eq!(
+            resolved_internal(&cmd, &con),
+            Some(Internal::bulk_rename),
+        );
+    }
+
+    #[test]
+    fn resolved_internal_recognises_verb_trigger_for_internal() {
+        let con = make_app_context();
+        // Find the verb_id for bulk_rename in the freshly-built store.
+        let verb_id = con
+            .verb_store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::bulk_rename))
+            .expect("bulk_rename verb registered")
+            .id;
+        let cmd = Command::VerbTrigger {
+            verb_id,
+            input_invocation: None,
+        };
+        assert_eq!(
+            resolved_internal(&cmd, &con),
+            Some(Internal::bulk_rename),
+        );
+    }
+
+    #[test]
+    fn resolved_internal_recognises_verb_invocate_by_name() {
+        let con = make_app_context();
+        let cmd = Command::VerbInvocate(VerbInvocation::new(
+            "bulk_rename_apply".to_string(),
+            None,
+            false,
+        ));
+        assert_eq!(
+            resolved_internal(&cmd, &con),
+            Some(Internal::bulk_rename_apply),
+        );
+    }
+
+    #[test]
+    fn resolved_internal_returns_none_for_non_verb_commands() {
+        let con = make_app_context();
+        assert_eq!(resolved_internal(&Command::None, &con), None);
+        assert_eq!(resolved_internal(&Command::Click(0, 0), &con), None);
+    }
+
+    /// The intercept's stage-size branching: `stage.len() < 2` runs the
+    /// inline path, anything else runs the bulk flow. Encoded as a
+    /// declarative table so a future regression on the boundary is
+    /// obvious.
+    #[test]
+    fn bulk_rename_routing_picks_inline_for_stage_below_two() {
+        let cases = [(0usize, false), (1, false), (2, true), (3, true), (10, true)];
+        for (count, expected_bulk) in cases {
+            let goes_bulk = count >= 2;
+            assert_eq!(
+                goes_bulk, expected_bulk,
+                "stage size {count}: expected bulk={expected_bulk} \
+                 (matches run_bulk_rename's `stage.len() < 2` guard)",
+            );
+        }
+    }
+
+    /// Pin that the fall-through path finds an external `rename` verb
+    /// in the default store. If someone unregisters or renames the
+    /// external rename, the stage-size-<2 leg has nothing to dispatch
+    /// to — and pressing F2 with an empty stage would surface a "stage
+    /// 2+ files" error instead of the inline rename prompt.
+    #[test]
+    fn fresh_store_has_external_rename_verb() {
+        let store = fresh_store();
+        let found = store
+            .verbs()
+            .iter()
+            .any(|v| v.has_name("rename") && v.get_internal().is_none());
+        assert!(
+            found,
+            "external `rename` verb must exist for the stage-<2 fall-through",
+        );
     }
 }

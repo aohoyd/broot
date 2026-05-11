@@ -53,6 +53,8 @@ Internals! {
     add: "create file or directory" false,
     apply_flags: "apply flags (eg `-sd` to show sizes and dates)" false,
     back: "revert to the previous state (mapped to *esc*)" false,
+    bulk_rename: "rename one or more files via $EDITOR" false,
+    bulk_rename_apply: "(internal continuation; do not bind)" false,
     default_layout: "restore default panel sizes" false,
     clear_output: "clear the --verb-output file" false,
     clear_stage: "empty the staging area" false,

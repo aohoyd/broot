@@ -69,6 +69,56 @@ Adding a new overlay variant means editing three places only: the
 filter, no panel callback, no `CmdResult` variant beyond the existing
 `OpenOverlay` (`src/app/app.rs:467`).
 
+### Bulk rename — App-level intercept and `pending_bulk_rename` payload
+
+The `Internal::bulk_rename` and `Internal::bulk_rename_apply` arms do
+**not** live in a `PanelState::on_internal` — they fire at the App
+level, intercepted at the top of `App::apply_command` (after the
+confirm intercept, before panel dispatch). The reason: the entry leg
+reads `app_state.stage`, suspends the TUI to run `$EDITOR`, plans the
+rename set, and opens a `ConfirmOverlay` — all `App`-level concerns
+that don't reduce to a panel-state callback. The lookup uses the
+`resolved_internal(cmd, con)` helper which recognises all three
+command shapes (`Command::Internal`, `Command::VerbTrigger`,
+`Command::VerbInvocate`) that can resolve to an internal.
+
+`App::pending_bulk_rename: Option<bulk_rename::RenameRun>` is the
+payload field, mirroring the `skip_confirm` single-field discipline.
+The entry leg (`run_bulk_rename`) populates it then opens the confirm
+overlay with `Command::from_raw(":bulk_rename_apply", true)` as the
+pending command. The overlay's `CloseAndRun` re-dispatches that
+command, which lands back in `apply_command`, the intercept matches
+again, and the apply leg (`run_bulk_rename_apply`) `mem::take`s the
+field. No `Command` enum payload changes — the run never travels
+through a command.
+
+**F2 dual-registration**: both the internal `bulk_rename` (in
+`add_builtin_verbs` directly before the rename external) and the
+external `rename` verb bind F2. `find_key_verb` returns the first
+verb in registration order whose filters pass, so the internal wins.
+The internal's stage-size branching is what surfaces the inline
+single-file flow when the stage is empty or has one path: it looks
+up the external `rename` verb by name (via
+`find_external_rename_verb_id`) and synthesizes a
+`Command::VerbTrigger` to drive it, leaving the external's existing
+arg-prompt behaviour unchanged.
+
+**Apply partial-failure semantics**: `bulk_rename::apply` is two-phase
+(`src/bulk_rename/mod.rs`'s `apply` function); cycles are resolved by
+renaming the source to `<name>.broot-bulk-tmp-{idx}` first, then
+renaming the temp onto the final target in a second pass. On the
+first `fs::rename` error the apply returns
+`Err((PathBuf, io::Error))` immediately — entries before the failure
+stay applied, no rollback. The status row gets the failing path and
+error message, the stage is NOT cleared (so the user can re-run from
+the surviving subset), and all panels refresh so the tree reflects
+the partial state. Phase-1 temps that survive a phase-2 failure are
+intentionally left on disk under their `.broot-bulk-tmp-{idx}` names.
+
+The bulk-stage confirm intercept (`maybe_bulk_stage_confirm`) skips
+the two bulk-rename internals (added alongside the stage-management
+list) so the dedicated diff modal is the only confirm the user sees.
+
 ## Verb confirmation system
 
 `Verb::requires_confirm: bool` (`src/verb/verb.rs:81`) is the explicit
