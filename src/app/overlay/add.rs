@@ -16,12 +16,13 @@
 //! ╰──────────────────────────────────────────────╯
 //! ```
 //!
-//! This task (Task 2) lands the struct, the render path, and the enum
-//! wiring. `handle_key` and `handle_mouse` are stubbed to `Stay` so the
-//! variant compiles and routing tests pass — Task 3 wires real input.
+//! Task 2 landed the struct, the render path, and the enum wiring.
+//! Task 3 (this file) wires real input handling and the filesystem
+//! commit.
 
 use {
     super::{
+        CellGetCloned,
         OverlayOutcome,
         OverlayState,
         io_err,
@@ -39,16 +40,28 @@ use {
         crossterm::{
             QueueableCommand,
             cursor,
-            event::MouseEvent,
+            event::{
+                KeyCode,
+                KeyModifiers,
+                MouseButton,
+                MouseEvent,
+                MouseEventKind,
+            },
         },
+        key,
     },
     std::{
         cell::Cell,
+        fs,
         io::{
             self,
             Write,
         },
-        path::PathBuf,
+        path::{
+            Component,
+            Path,
+            PathBuf,
+        },
     },
     termimad::{
         Area,
@@ -60,28 +73,21 @@ use {
 ///
 /// Crate-internal: the overlay's focus state is an implementation
 /// detail of the overlay layer. `Cancel` is the safe default so a stray
-/// Enter does not create a file.
-///
-/// `Create` is unused until Task 3 wires Tab-focus-toggle and Enter
-/// dispatch; render already styles both branches so the variant must
-/// exist now.
+/// mouse click won't accidentally create a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum AddFocus {
     Cancel,
     Create,
 }
 
 /// Hit-test rectangles for the two buttons. Recomputed on every render
-/// and consulted by `handle_mouse` (Task 3) to translate clicks into
-/// outcomes.
+/// and consulted by `handle_mouse` to translate clicks into outcomes.
 ///
 /// Intentionally a local copy of the same shape used by
 /// `ConfirmOverlay::ButtonHits` rather than a shared import: the cost
 /// of cross-module visibility plumbing for a 4-line struct is higher
 /// than the cost of the duplication.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct ButtonHits {
     pub(crate) cancel: Area,
     pub(crate) confirm: Area,
@@ -92,11 +98,9 @@ pub(crate) struct ButtonHits {
 /// (mkdir-p style); otherwise a regular file is created with any
 /// intermediate directories.
 ///
-/// `cursor` is in `chars()` units and tracks the insertion position
-/// inside `input`. Render currently paints the cursor glyph at the
-/// tail of the (truncated) input; Task 3 will move the glyph to
-/// `cursor` mid-input.
-#[allow(dead_code)]
+/// `cursor` is a byte index into `input` and tracks the insertion
+/// position. For ASCII filenames this matches char index; for
+/// multi-byte UTF-8 we step on char boundaries via `char_indices`.
 pub struct AddOverlay {
     pub(crate) target_dir: PathBuf,
     pub(crate) input: String,
@@ -104,7 +108,7 @@ pub struct AddOverlay {
     pub(crate) error: Option<String>,
     pub(crate) focus: AddFocus,
     /// Hit-rects for mouse routing — populated by `render` so
-    /// `handle_mouse` (Task 3) can test clicks against them.
+    /// `handle_mouse` can test clicks against them.
     pub(crate) button_hits: Cell<Option<ButtonHits>>,
 }
 
@@ -120,6 +124,90 @@ impl AddOverlay {
             focus: AddFocus::Cancel,
             button_hits: Cell::new(None),
         }
+    }
+
+    /// Validate `self.input` against the rules in the plan. Returns an
+    /// error string ready to render, or `None` if the input is valid.
+    fn validation_error(&self) -> Option<String> {
+        if self.input.is_empty() {
+            return Some("name cannot be empty".to_string());
+        }
+        if self.input.starts_with('/') {
+            return Some("name cannot start with /".to_string());
+        }
+        if Path::new(&self.input)
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Some("'..' not allowed".to_string());
+        }
+        None
+    }
+
+    /// Run validation + filesystem commit. On success returns
+    /// `CloseAndFocus(full)`; on validation or IO failure stores the
+    /// error in `self.error` and returns `Stay`.
+    fn try_commit(&mut self) -> OverlayOutcome {
+        if let Some(err) = self.validation_error() {
+            self.error = Some(err);
+            return OverlayOutcome::Stay;
+        }
+
+        // Compute target path. Trailing `/` means directory.
+        let make_dir = self.input.ends_with('/');
+        let trimmed = self.input.trim_end_matches('/');
+        let full = self.target_dir.join(trimmed);
+
+        let result: io::Result<()> = if make_dir {
+            fs::create_dir_all(&full)
+        } else {
+            // Ensure the parent directory exists. `full.parent()`
+            // returns `None` only for paths with no parent component
+            // (e.g. the root `/`); we already rejected absolute paths
+            // in validation, so falling back to `target_dir` is safe.
+            let parent = full.parent().unwrap_or(&self.target_dir);
+            fs::create_dir_all(parent)
+                .and_then(|()| fs::File::create(&full).map(|_| ()))
+        };
+
+        match result {
+            Ok(()) => OverlayOutcome::CloseAndFocus(full),
+            Err(err) => {
+                self.error = Some(format!("{err}"));
+                OverlayOutcome::Stay
+            }
+        }
+    }
+
+    /// Find the byte index of the char that ends at `self.cursor`,
+    /// i.e. the start of the char immediately before the cursor.
+    /// Returns `None` if the cursor is at 0.
+    fn prev_char_boundary(&self) -> Option<usize> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.input
+            .char_indices()
+            .rev()
+            .find(|(i, _)| *i < self.cursor)
+            .map(|(i, _)| i)
+    }
+
+    /// Find the byte index of the char immediately after the cursor.
+    /// Returns `None` if the cursor is already at the string end.
+    fn next_char_boundary(&self) -> Option<usize> {
+        self.input
+            .char_indices()
+            .find(|(i, _)| *i >= self.cursor)
+            .and_then(|(i, c)| {
+                if i == self.cursor {
+                    Some(i + c.len_utf8())
+                } else {
+                    // Cursor was mid-char (shouldn't happen given we
+                    // only ever set it to a boundary); snap forward.
+                    Some(i)
+                }
+            })
     }
 }
 
@@ -183,8 +271,7 @@ impl OverlayState for AddOverlay {
             .queue_str(w, &input_display)
             .map_err(io_err)?;
         // Cursor glyph — visual only; positioned at the end of the
-        // (possibly truncated) input. Task 3 will paint the glyph at
-        // `self.cursor` mid-input; this scaffold puts it at the tail.
+        // (possibly truncated) input.
         input_style.queue(w, '▏').map_err(io_err)?;
 
         // ---- hint / error row ------------------------------------------
@@ -239,7 +326,7 @@ impl OverlayState for AddOverlay {
             .queue_str(w, truncate_to_width(create_text, confirm_w as usize))
             .map_err(io_err)?;
 
-        // Cache hit-rects for mouse routing (consumed by Task 3).
+        // Cache hit-rects for mouse routing.
         let cancel_rect = Area::new(cancel_x, button_row_y, cancel_w, 1);
         let confirm_rect = Area::new(confirm_x, button_row_y, confirm_w, 1);
         self.button_hits.set(Some(ButtonHits {
@@ -252,18 +339,116 @@ impl OverlayState for AddOverlay {
 
     fn handle_key(
         &mut self,
-        _key: KeyCombination,
+        key: KeyCombination,
     ) -> OverlayOutcome {
-        // Stub — Task 3 wires real input handling.
+        // ---- Cancel-class keys -----------------------------------------
+        if key == key!(esc) || key == key!(ctrl - c) {
+            return OverlayOutcome::Close;
+        }
+
+        // ---- Enter: validate + commit ----------------------------------
+        // Enter always tries to commit, regardless of focus. The buttons
+        // exist for mouse users; keyboard users live in the input field
+        // and Enter is the natural "submit" key. Cancel via Esc/Ctrl-C
+        // or a mouse click on the Cancel button.
+        if key == key!(enter) {
+            return self.try_commit();
+        }
+
+        // ---- Tab: toggle focus -----------------------------------------
+        // Note: arrow keys are *not* focus-toggles here (unlike
+        // confirm.rs) because they must move the text cursor.
+        if key == key!(tab) {
+            self.focus = match self.focus {
+                AddFocus::Cancel => AddFocus::Create,
+                AddFocus::Create => AddFocus::Cancel,
+            };
+            return OverlayOutcome::Stay;
+        }
+
+        // ---- Cursor movement -------------------------------------------
+        if key == key!(left) {
+            if let Some(prev) = self.prev_char_boundary() {
+                self.cursor = prev;
+            }
+            return OverlayOutcome::Stay;
+        }
+        if key == key!(right) {
+            if let Some(next) = self.next_char_boundary() {
+                self.cursor = next.min(self.input.len());
+            }
+            return OverlayOutcome::Stay;
+        }
+        if key == key!(home) {
+            self.cursor = 0;
+            return OverlayOutcome::Stay;
+        }
+        if key == key!(end) {
+            self.cursor = self.input.len();
+            return OverlayOutcome::Stay;
+        }
+
+        // ---- Backspace: delete char before cursor ----------------------
+        if key == key!(backspace) {
+            if let Some(prev) = self.prev_char_boundary() {
+                self.input.remove(prev);
+                self.cursor = prev;
+            }
+            return OverlayOutcome::Stay;
+        }
+
+        // ---- Printable char insertion ----------------------------------
+        if let Some(c) = key_to_printable_char(&key) {
+            // Defensive: only insert at a valid char boundary. `cursor`
+            // is maintained at a boundary by every path above, so this
+            // is essentially a no-op in practice — but it pins the
+            // invariant.
+            if self.cursor <= self.input.len() && self.input.is_char_boundary(self.cursor) {
+                self.input.insert(self.cursor, c);
+                self.cursor += c.len_utf8();
+            }
+            return OverlayOutcome::Stay;
+        }
+
+        // Anything else: consumed silently.
         OverlayOutcome::Stay
     }
 
     fn handle_mouse(
         &mut self,
-        _ev: MouseEvent,
+        ev: MouseEvent,
     ) -> OverlayOutcome {
-        // Stub — Task 3 wires real mouse handling.
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return OverlayOutcome::Stay;
+        }
+        let Some(hits) = self.button_hits.get_cloned() else {
+            return OverlayOutcome::Stay;
+        };
+        if hits.confirm.contains(ev.column, ev.row) {
+            return self.try_commit();
+        }
+        if hits.cancel.contains(ev.column, ev.row) {
+            return OverlayOutcome::Close;
+        }
         OverlayOutcome::Stay
+    }
+}
+
+// =============================================================================
+// helpers
+// =============================================================================
+
+/// Extract a printable character from a `KeyCombination`. Modifier-
+/// bearing combos other than plain Shift are rejected so e.g. `Ctrl-a`
+/// doesn't get treated as the letter `a`. Control chars are also
+/// rejected — those should never enter `input`.
+fn key_to_printable_char(key: &KeyCombination) -> Option<char> {
+    if !key.modifiers.is_empty() && key.modifiers != KeyModifiers::SHIFT {
+        return None;
+    }
+    match key.codes.first() {
+        KeyCode::Char(c) if !c.is_control() => Some(*c),
+        _ => None,
     }
 }
 
@@ -286,6 +471,24 @@ mod tests {
         o.render(&mut wbuf, screen, &palette).unwrap();
         let bytes = wbuf.buffer().to_vec();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn render_into(o: &AddOverlay) {
+        // Drive the render path purely for its `button_hits` side
+        // effect — the bytes are dropped.
+        let palette = StyleMap::no_term();
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
+        let screen = Area::new(0, 0, 80, 24);
+        o.render(&mut wbuf, screen, &palette).unwrap();
+    }
+
+    fn mouse_at(x: u16, y: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     // ---- construction ---------------------------------------------------
@@ -392,7 +595,7 @@ mod tests {
     fn render_input_string_appears_in_bytes() {
         let mut o = make();
         o.input = "hello.txt".to_string();
-        o.cursor = o.input.chars().count();
+        o.cursor = o.input.len();
         let s = render_to_string(&o);
         assert!(
             s.contains("hello.txt"),
@@ -416,26 +619,365 @@ mod tests {
         assert!(!s.contains('╭'), "tiny terminal should bail before drawing frame");
     }
 
-    // ---- stubbed handlers (Task 3 will replace) -------------------------
+    // ---- key dispatch: editing -----------------------------------------
 
     #[test]
-    fn handle_key_stub_returns_stay() {
+    fn char_insertion_appends_at_end() {
         let mut o = make();
-        let r = o.handle_key(crokey::key!('a'));
+        let r = o.handle_key(key!('a'));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.input, "a");
+        assert_eq!(o.cursor, 1);
+        let _ = o.handle_key(key!('b'));
+        let _ = o.handle_key(key!('c'));
+        assert_eq!(o.input, "abc");
+        assert_eq!(o.cursor, 3);
+    }
+
+    #[test]
+    fn char_insertion_at_cursor_mid_string() {
+        let mut o = make();
+        for c in "ac".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        // Move cursor between `a` and `c`.
+        o.cursor = 1;
+        let _ = o.handle_key(key!('b'));
+        assert_eq!(o.input, "abc");
+        assert_eq!(o.cursor, 2);
+    }
+
+    #[test]
+    fn slash_is_a_valid_printable_char() {
+        let mut o = make();
+        for c in "ab".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        let _ = o.handle_key(key!('/'));
+        assert_eq!(o.input, "ab/");
+        assert_eq!(o.cursor, 3);
+    }
+
+    #[test]
+    fn backspace_deletes_char_before_cursor() {
+        let mut o = make();
+        for c in "abc".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        let _ = o.handle_key(key!(backspace));
+        assert_eq!(o.input, "ab");
+        assert_eq!(o.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_at_zero_is_noop() {
+        let mut o = make();
+        let r = o.handle_key(key!(backspace));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.input, "");
+        assert_eq!(o.cursor, 0);
+    }
+
+    #[test]
+    fn backspace_mid_string_deletes_correct_char() {
+        let mut o = make();
+        for c in "abc".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        o.cursor = 2; // between `b` and `c`.
+        let _ = o.handle_key(key!(backspace));
+        assert_eq!(o.input, "ac");
+        assert_eq!(o.cursor, 1);
+    }
+
+    #[test]
+    fn left_arrow_moves_cursor_back() {
+        let mut o = make();
+        for c in "ab".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.cursor, 1);
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.cursor, 0);
+    }
+
+    #[test]
+    fn left_arrow_clamps_at_zero() {
+        let mut o = make();
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.cursor, 0);
+    }
+
+    #[test]
+    fn right_arrow_moves_cursor_forward() {
+        let mut o = make();
+        for c in "ab".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        o.cursor = 0;
+        let _ = o.handle_key(key!(right));
+        assert_eq!(o.cursor, 1);
+        let _ = o.handle_key(key!(right));
+        assert_eq!(o.cursor, 2);
+    }
+
+    #[test]
+    fn right_arrow_clamps_at_end() {
+        let mut o = make();
+        for c in "ab".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        // cursor already at end (2).
+        let _ = o.handle_key(key!(right));
+        assert_eq!(o.cursor, 2);
+    }
+
+    #[test]
+    fn home_jumps_to_start() {
+        let mut o = make();
+        for c in "abc".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        let _ = o.handle_key(key!(home));
+        assert_eq!(o.cursor, 0);
+    }
+
+    #[test]
+    fn end_jumps_to_end() {
+        let mut o = make();
+        for c in "abc".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        o.cursor = 0;
+        let _ = o.handle_key(key!(end));
+        assert_eq!(o.cursor, 3);
+    }
+
+    // ---- key dispatch: control -----------------------------------------
+
+    #[test]
+    fn tab_toggles_focus() {
+        let mut o = make();
+        assert_eq!(o.focus, AddFocus::Cancel);
+        let r = o.handle_key(key!(tab));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.focus, AddFocus::Create);
+        let _ = o.handle_key(key!(tab));
+        assert_eq!(o.focus, AddFocus::Cancel);
+    }
+
+    #[test]
+    fn arrow_keys_do_not_toggle_focus() {
+        // Pin behaviour: in an input-bearing modal, arrows move the
+        // text cursor, *not* focus. This is the divergence point from
+        // `ConfirmOverlay` and we want it tested explicitly.
+        let mut o = make();
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.focus, AddFocus::Cancel);
+        let _ = o.handle_key(key!(right));
+        assert_eq!(o.focus, AddFocus::Cancel);
+    }
+
+    #[test]
+    fn esc_closes() {
+        let mut o = make();
+        let r = o.handle_key(key!(esc));
+        assert!(matches!(r, OverlayOutcome::Close));
+    }
+
+    #[test]
+    fn ctrl_c_closes() {
+        let mut o = make();
+        let r = o.handle_key(key!(ctrl - c));
+        assert!(matches!(r, OverlayOutcome::Close));
+    }
+
+    #[test]
+    fn ctrl_a_is_ignored_not_inserted() {
+        // Ctrl-a is a control combo; it must not insert `a` into the
+        // input or do any cursor-move (we'd need separate plumbing for
+        // emacs-style line editing).
+        let mut o = make();
+        let _ = o.handle_key(key!(ctrl - a));
+        assert_eq!(o.input, "");
+        assert_eq!(o.cursor, 0);
+    }
+
+    #[test]
+    fn shift_letter_inserts_uppercase() {
+        // Plain Shift modifier is allowed; produces uppercase.
+        let mut o = make();
+        let _ = o.handle_key(key!(shift - 'a'));
+        assert_eq!(o.input, "A");
+        assert_eq!(o.cursor, 1);
+    }
+
+    // ---- validation -----------------------------------------------------
+
+    #[test]
+    fn empty_input_rejected_by_enter() {
+        let mut o = make();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.error.as_deref(), Some("name cannot be empty"));
+    }
+
+    #[test]
+    fn leading_slash_rejected() {
+        let mut o = make();
+        o.input = "/etc/passwd".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.error.as_deref(), Some("name cannot start with /"));
+    }
+
+    #[test]
+    fn parent_dir_component_rejected() {
+        let mut o = make();
+        o.input = "../escape.txt".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.error.as_deref(), Some("'..' not allowed"));
+    }
+
+    #[test]
+    fn parent_dir_nested_component_rejected() {
+        // The check must catch `..` as any component, not just at the
+        // start.
+        let mut o = make();
+        o.input = "foo/../bar".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(o.error.as_deref(), Some("'..' not allowed"));
+    }
+
+    // ---- mouse routing --------------------------------------------------
+
+    #[test]
+    fn mouse_on_cancel_closes() {
+        let mut o = make();
+        render_into(&o);
+        let hits = o.button_hits.get_cloned().unwrap();
+        let cx = hits.cancel.left + hits.cancel.width / 2;
+        let cy = hits.cancel.top;
+        let r = o.handle_mouse(mouse_at(cx, cy));
+        assert!(matches!(r, OverlayOutcome::Close));
+    }
+
+    #[test]
+    fn mouse_on_create_with_empty_input_stays_and_sets_error() {
+        let mut o = make();
+        render_into(&o);
+        let hits = o.button_hits.get_cloned().unwrap();
+        let cx = hits.confirm.left + hits.confirm.width / 2;
+        let cy = hits.confirm.top;
+        let r = o.handle_mouse(mouse_at(cx, cy));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert!(o.error.is_some());
+    }
+
+    #[test]
+    fn mouse_off_buttons_stays() {
+        let mut o = make();
+        render_into(&o);
+        let r = o.handle_mouse(mouse_at(0, 0));
         assert!(matches!(r, OverlayOutcome::Stay));
     }
 
     #[test]
-    fn handle_mouse_stub_returns_stay() {
-        use crokey::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+    fn mouse_non_left_click_stays() {
         let mut o = make();
+        render_into(&o);
+        let hits = o.button_hits.get_cloned().unwrap();
+        let cx = hits.cancel.left + hits.cancel.width / 2;
+        let cy = hits.cancel.top;
         let ev = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 0,
-            row: 0,
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: cx,
+            row: cy,
             modifiers: KeyModifiers::NONE,
         };
         let r = o.handle_mouse(ev);
         assert!(matches!(r, OverlayOutcome::Stay));
+    }
+
+    #[test]
+    fn mouse_before_render_stays() {
+        let mut o = make();
+        let r = o.handle_mouse(mouse_at(40, 12));
+        assert!(matches!(r, OverlayOutcome::Stay));
+    }
+
+    // ---- filesystem commit ---------------------------------------------
+
+    #[test]
+    fn commit_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut o = AddOverlay::new(tmp.path().to_path_buf());
+        o.input = "foo.txt".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        let expected = tmp.path().join("foo.txt");
+        match r {
+            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, expected),
+            other => panic!("expected CloseAndFocus, got {other:?}"),
+        }
+        assert!(expected.exists(), "file must exist on disk");
+        assert!(expected.is_file(), "must be a regular file");
+        assert!(o.error.is_none());
+    }
+
+    #[test]
+    fn commit_creates_directory_with_trailing_slash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut o = AddOverlay::new(tmp.path().to_path_buf());
+        o.input = "bar/".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        let expected = tmp.path().join("bar");
+        match r {
+            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, expected),
+            other => panic!("expected CloseAndFocus, got {other:?}"),
+        }
+        assert!(expected.exists());
+        assert!(expected.is_dir(), "must be a directory");
+    }
+
+    #[test]
+    fn commit_creates_nested_file_with_intermediate_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut o = AddOverlay::new(tmp.path().to_path_buf());
+        o.input = "nested/deeper/file.txt".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        let expected = tmp.path().join("nested/deeper/file.txt");
+        match r {
+            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, expected),
+            other => panic!("expected CloseAndFocus, got {other:?}"),
+        }
+        assert!(expected.exists());
+        assert!(expected.is_file());
+        assert!(tmp.path().join("nested/deeper").is_dir());
+    }
+
+    #[test]
+    fn commit_failure_sets_error_and_stays() {
+        // target_dir is a non-existent path inside a read-only location
+        // — actually, easier: the target_dir itself doesn't exist, and
+        // the filename contains a NUL byte which always errors on POSIX.
+        // But `Path::new` accepts NUL until the `fs::File::create` call.
+        // Use a NUL in the filename: that will error in `File::create`
+        // / `create_dir_all` reliably.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut o = AddOverlay::new(tmp.path().to_path_buf());
+        o.input = "bad\0name".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert!(o.error.is_some(), "filesystem error should populate error");
     }
 }

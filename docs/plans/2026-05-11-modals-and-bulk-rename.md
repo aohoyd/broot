@@ -148,14 +148,14 @@ Internal::bulk_rename (stage.len() >= 2)
 **Files:**
 - Modify: `src/app/overlay/add.rs`
 
-- [ ] implement `handle_key`: printable chars insert at `cursor` (including `/`), Backspace deletes before cursor, `←`/`→`/Home/End move cursor, Tab toggles focus, Esc/Ctrl-C return `Close`, Enter validates + commits
-- [ ] implement `handle_mouse`: left-click on Cancel hit-rect returns `Close`, on Create runs commit, other clicks return `Stay`
-- [ ] implement validation: reject empty `input`, reject any path component equal to `..`, reject `input.starts_with('/')`; on rejection set `self.error` and return `Stay`
-- [ ] implement commit: if `input.ends_with('/')` call `fs::create_dir_all(target_dir.join(&input))`; else compute `full`, `fs::create_dir_all(full.parent().unwrap_or(&target_dir))` then `fs::File::create(&full)`; on `Err` set `self.error` and return `Stay`; on `Ok` return `CloseAndFocus(full)`
-- [ ] write unit tests for key handling: char insertion at cursor, backspace, cursor movement clamping, Tab focus toggle, Esc closes
-- [ ] write unit tests for validation: empty input rejected, leading `/` rejected, `..` component rejected
-- [ ] write filesystem integration tests using `tempfile::tempdir()`: create file `foo.txt`, create dir `bar/`, create nested `nested/deeper/file.txt`, assert filesystem state after each
-- [ ] run `cargo test` — must pass before next task
+- [x] implement `handle_key`: printable chars insert at `cursor` (including `/`), Backspace deletes before cursor, `←`/`→`/Home/End move cursor, Tab toggles focus, Esc/Ctrl-C return `Close`, Enter validates + commits
+- [x] implement `handle_mouse`: left-click on Cancel hit-rect returns `Close`, on Create runs commit, other clicks return `Stay`
+- [x] implement validation: reject empty `input`, reject any path component equal to `..`, reject `input.starts_with('/')`; on rejection set `self.error` and return `Stay`
+- [x] implement commit: if `input.ends_with('/')` call `fs::create_dir_all(target_dir.join(&input))`; else compute `full`, `fs::create_dir_all(full.parent().unwrap_or(&target_dir))` then `fs::File::create(&full)`; on `Err` set `self.error` and return `Stay`; on `Ok` return `CloseAndFocus(full)`
+- [x] write unit tests for key handling: char insertion at cursor, backspace, cursor movement clamping, Tab focus toggle, Esc closes
+- [x] write unit tests for validation: empty input rejected, leading `/` rejected, `..` component rejected
+- [x] write filesystem integration tests using `tempfile::tempdir()`: create file `foo.txt`, create dir `bar/`, create nested `nested/deeper/file.txt`, assert filesystem state after each
+- [x] run `cargo test` — must pass before next task
 
 ### Task 4: Internal::add registration + BrowserState routing
 
