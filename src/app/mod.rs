@@ -6,6 +6,7 @@ mod bookmark;
 mod cmd_context;
 mod cmd_result;
 mod display_context;
+pub(crate) mod editor;
 mod mode;
 pub(crate) mod overlay;
 mod panel;

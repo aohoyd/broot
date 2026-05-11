@@ -179,17 +179,17 @@ Internal::bulk_rename (stage.len() >= 2)
 - Create: `src/app/editor.rs`
 - Modify: `src/app/mod.rs` (or equivalent module-listing file)
 
-- [ ] check `src/app/mod.rs` for the current module list and add `pub mod editor;` (or `mod editor;` plus `pub use`) following existing conventions
-- [ ] create `src/app/editor.rs` with `pub fn edit_in_external(content: &str, suffix: &str) -> io::Result<String>`: resolve `$VISUAL` → `$EDITOR`, return `io::Error::new(io::ErrorKind::NotFound, "set $EDITOR to enable this feature")` if neither set
-- [ ] write `content` to a `tempfile::Builder::new().suffix(suffix).tempfile()?`
-- [ ] toggle out of raw mode + leave alternate screen by mirroring the exact sequence in `src/launchable.rs:170-205` (extract the toggle pair into private helpers if it cleans up the call site; otherwise inline)
-- [ ] `std::process::Command::new(editor).arg(temp.path()).status()?`; on non-success status return an `io::Error`
-- [ ] re-enter raw mode + alternate screen on the return path; ensure re-entry happens even on early-return errors (use a guard struct or explicit `Drop`-style handling)
-- [ ] read the temp file back and return its contents; `tempfile` auto-cleans on drop
-- [ ] write a unit test that sets `EDITOR=/bin/true` in the test env, calls `edit_in_external("hello", ".test")`, and asserts the returned content equals what `/bin/true` left in the file (i.e. the original `"hello"`)
-- [ ] write a unit test that unsets both `EDITOR` and `VISUAL` (or sets them empty) and asserts the helper returns an `Err` with the documented message
-- [ ] **Important**: tests must not depend on a TTY being attached. If the raw-mode toggle calls fail when stdin isn't a TTY, gate the toggle behind a `cfg(test)` flag or a `is_tty()` check — document the decision in code
-- [ ] run `cargo test` — must pass before next task
+- [x] check `src/app/mod.rs` for the current module list and add `pub mod editor;` (or `mod editor;` plus `pub use`) following existing conventions
+- [x] create `src/app/editor.rs` with `pub fn edit_in_external(content: &str, suffix: &str) -> io::Result<String>`: resolve `$VISUAL` → `$EDITOR`, return `io::Error::new(io::ErrorKind::NotFound, "set $EDITOR to enable this feature")` if neither set
+- [x] write `content` to a `tempfile::Builder::new().suffix(suffix).tempfile()?`
+- [x] toggle out of raw mode + leave alternate screen by mirroring the exact sequence in `src/launchable.rs:170-205` (extract the toggle pair into private helpers if it cleans up the call site; otherwise inline)
+- [x] `std::process::Command::new(editor).arg(temp.path()).status()?`; on non-success status return an `io::Error`
+- [x] re-enter raw mode + alternate screen on the return path; ensure re-entry happens even on early-return errors (use a guard struct or explicit `Drop`-style handling)
+- [x] read the temp file back and return its contents; `tempfile` auto-cleans on drop
+- [x] write a unit test that sets `EDITOR=/bin/true` in the test env, calls `edit_in_external("hello", ".test")`, and asserts the returned content equals what `/bin/true` left in the file (i.e. the original `"hello"`)
+- [x] write a unit test that unsets both `EDITOR` and `VISUAL` (or sets them empty) and asserts the helper returns an `Err` with the documented message
+- [x] **Important**: tests must not depend on a TTY being attached. If the raw-mode toggle calls fail when stdin isn't a TTY, gate the toggle behind a `cfg(test)` flag or a `is_tty()` check — document the decision in code
+- [x] run `cargo test` — must pass before next task
 
 ### Task 6: `bulk_rename` pure-function module
 
