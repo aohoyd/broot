@@ -16,7 +16,7 @@ status row) paints into `state`. Mixing them either draws on top of the
 frame or leaves a 1-cell gap.
 
 `BrowserState::page_height` returns `screen.height - 4`
-(`src/browser/browser_state.rs:118-124`): minus 1 for the input row,
+(`src/browser/browser_state.rs:142-148`): minus 1 for the input row,
 1 for the status row, and 1 for each of the top/bottom frame edges.
 Any new `PanelState` impl that does its own page arithmetic must
 mirror this — see `move_selection` / `try_select_next_filtered` for the
@@ -98,6 +98,17 @@ overlay also bails out as a no-op render when
 `area.width < 8 || area.height < 5` (`src/app/overlay/add.rs:226`) so
 pathologically small terminals don't draw a half-frame.
 
+Overwrite policy: `try_commit` refuses to clobber an existing entry.
+After validation passes, the helper probes `full.exists()` and, if
+true, sets `self.error = "file or directory already exists"` and
+returns `Stay` — the user picks a different name. This matches the
+codebase's "destructive operations require a confirm overlay" policy:
+silently truncating an existing file (which `fs::File::create` would
+do) would bypass the confirm intercept entirely, and a `:add` modal
+that surprises a user by wiping their work is a footgun. There is no
+"force overwrite" path — destructive replacement is the job of
+`:rm` + `:add`, both of which already prompt.
+
 `maybe_bulk_stage_confirm` skips `Internal::add` (alongside the
 bulk-rename internals) so pressing `alt-n` while the stage panel is
 active with 2+ staged paths opens the Add modal directly rather than
@@ -157,10 +168,10 @@ list) so the dedicated diff modal is the only confirm the user sees.
 
 `Verb::requires_confirm: bool` (`src/verb/verb.rs:81`) is the explicit
 always-on destructive-verb signal, set via `Verb::with_confirm(true)`
-at registration time (`src/verb/verb_store.rs:326-334` for the built-in
+at registration time (`src/verb/verb_store.rs:338-343` for the built-in
 `:rm` external verb). Users override it per-verb through
 `VerbConf::confirm: Option<bool>` — see the apply path at
-`src/verb/verb_store.rs:562`.
+`src/verb/verb_store.rs:571`.
 
 `:trash` is **not** registered with `with_confirm`. Its confirmation
 fires from a hardcoded name/internal check inside
@@ -436,5 +447,5 @@ are pathological at that width anyway.
 Four production call sites pass the `selected` arg: the panel render
 in `src/app/app_panels.rs:712` forwards `panel.state().title_selected()`;
 the three overlay renderers (`src/app/overlay/goto.rs:195`,
-`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:247`) always
+`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:244`) always
 pass `false` — overlays have no selectable root.
