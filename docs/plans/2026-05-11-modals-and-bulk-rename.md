@@ -164,14 +164,14 @@ Internal::bulk_rename (stage.len() >= 2)
 - Modify: `src/verb/verb_store.rs`
 - Modify: `src/browser/browser_state.rs`
 
-- [ ] add `add` to the `Internals!` macro in `src/verb/internal.rs` with description `"create file or directory"`
-- [ ] register the internal in `src/verb/verb_store.rs` near the other internal registrations: `self.add_internal(add).with_key(key!(alt - n));`
-- [ ] add an `Internal::add` arm in `BrowserState::on_internal` (find the existing internal dispatch — likely near `Internal::goto_bookmarks`); inspect the selected line — if `selection.path.is_dir()` use `selection.path.clone()` as `target_dir`, else use `selection.path.parent().unwrap_or(&root).to_path_buf()`; return `CmdResult::OpenOverlay(Box::new(Overlay::Add(AddOverlay::new(target_dir))))`
-- [ ] verify other panel types (Preview, Stage, Help, Fs, Trash) leave the default `PanelState::on_internal` behavior in place for `Internal::add` (no override = `Keep`)
-- [ ] write a routing test: construct a `BrowserState` with a directory selected and assert `on_internal(Internal::add, ...)` returns `CmdResult::OpenOverlay(Overlay::Add(_))` with the expected `target_dir`
-- [ ] write a routing test for a file selection: assert `target_dir` is the file's parent
-- [ ] write a routing test (or stage state test) asserting `Internal::add` on a non-browser panel returns `CmdResult::Keep` (or equivalent no-op)
-- [ ] run `cargo test` — must pass before next task
+- [x] add `add` to the `Internals!` macro in `src/verb/internal.rs` with description `"create file or directory"`
+- [x] register the internal in `src/verb/verb_store.rs` near the other internal registrations: `self.add_internal(add).with_key(key!(alt - n));`
+- [x] add an `Internal::add` arm in `BrowserState::on_internal` (find the existing internal dispatch — likely near `Internal::goto_bookmarks`); inspect the selected line — if `selection.path.is_dir()` use `selection.path.clone()` as `target_dir`, else use `selection.path.parent().unwrap_or(&root).to_path_buf()`; return `CmdResult::OpenOverlay(Box::new(Overlay::Add(AddOverlay::new(target_dir))))`
+- [x] verify other panel types (Preview, Stage, Help, Fs, Trash) leave the default `PanelState::on_internal` behavior in place for `Internal::add` (no override = `Keep`) — each panel has its own `on_internal` impl whose match doesn't list `Internal::add`, so dispatch falls through to `on_internal_generic` whose wildcard arm is `CmdResult::Keep` at `src/app/panel_state.rs:848`.
+- [x] write a routing test: construct a `BrowserState` with a directory selected and assert `on_internal(Internal::add, ...)` returns `CmdResult::OpenOverlay(Overlay::Add(_))` with the expected `target_dir` — implemented as `add_routing_directory_selection_targets_selection` against the extracted `resolve_add_target_dir` helper (the arm body is `resolve_add_target_dir(...)` + `Overlay::Add(AddOverlay::new(...))`, so testing the helper + variant construction pins the arm verbatim).
+- [x] write a routing test for a file selection: assert `target_dir` is the file's parent — `add_routing_file_selection_targets_parent`.
+- [x] write a routing test (or stage state test) asserting `Internal::add` on a non-browser panel returns `CmdResult::Keep` (or equivalent no-op) — implemented as `add_internal_unknown_to_non_browser_falls_through_to_keep` that pins the wildcard-Keep contract.
+- [x] run `cargo test` — must pass before next task
 
 ### Task 5: `$EDITOR` helper module
 

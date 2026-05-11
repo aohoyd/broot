@@ -29,7 +29,7 @@ pub use {
     cmd_result::*,
     display_context::*,
     mode::*,
-    overlay::{ConfirmOverlay, GotoOverlay, Overlay, OverlayOutcome, OverlayState},
+    overlay::{AddOverlay, ConfirmOverlay, GotoOverlay, Overlay, OverlayOutcome, OverlayState},
     panel::Panel,
     panel_id::PanelId,
     panel_purpose::PanelPurpose,

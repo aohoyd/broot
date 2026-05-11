@@ -50,6 +50,7 @@ macro_rules! Internals {
 // internals:
 //  name: "description" needs_a_path
 Internals! {
+    add: "create file or directory" false,
     apply_flags: "apply flags (eg `-sd` to show sizes and dates)" false,
     back: "revert to the previous state (mapped to *esc*)" false,
     default_layout: "restore default panel sizes" false,

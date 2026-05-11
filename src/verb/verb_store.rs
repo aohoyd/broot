@@ -277,6 +277,7 @@ impl VerbStore {
         self.add_internal(goto_bookmarks)
             .with_key(key!('g'))
             .with_shortcut("goto");
+        self.add_internal(add).with_key(key!(alt - n));
         self.add_internal(page_down)
             .with_key(key!(ctrl - d))
             .with_key(key!(pagedown));
