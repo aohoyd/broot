@@ -102,12 +102,22 @@ dispatch; the first match wins:
 
 1. Bulk staging — `App::maybe_bulk_stage_confirm`
    (`src/app/app.rs:621`). Fires only when the stage panel is the
-   active panel and `app_state.stage.len() >= 2`. Skips stage-management
-   internals (`is_stage_management_internal`,
-   `src/app/app.rs:1083-1097`) — those are `Internal::stage`,
-   `unstage`, `toggle_stage`, `clear_stage`, `stage_all_directories`,
-   `stage_all_files`, and `*_staging_area` — because they operate
-   on the stage itself, not on its contents.
+   active panel and `app_state.stage.len() >= 2`. Skips two classes of
+   internals via `is_stage_management_internal`
+   (`src/app/app.rs:1083`). First, the stage-management internals
+   (`Internal::stage`, `unstage`, `toggle_stage`, `clear_stage`,
+   `stage_all_directories`, `stage_all_files`, `*_staging_area`) —
+   they operate on the stage itself, not on its contents. Second,
+   the pure navigation internals (`line_up`, `line_down`,
+   `line_up_no_cycle`, `line_down_no_cycle`, `page_up`, `page_down`,
+   `select_first`, `select_last`) — pressing j/k/PgUp/PgDn moves the
+   cursor inside the stage panel, it doesn't fan out across staged
+   paths, so a "Run :line_down on N files?" prompt would be nonsensical.
+   Both classes share one bypass function because the call site only
+   needs a yes/no decision; the dual purpose is documented at the
+   `matches!` arm. `select_first` / `select_last` are added defensively
+   — navigation-shaped, even though `stage_state.rs` does not dispatch
+   them today.
 2. Overwrite check — resolved destination of `:cp`/`:mv` already
    `exists()`.
 3. Per-verb `requires_confirm` (and the `Internal::trash` shape, which

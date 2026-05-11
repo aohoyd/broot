@@ -1083,6 +1083,8 @@ fn resolve_overwrite_target(
 fn is_stage_management_internal(internal: Internal) -> bool {
     matches!(
         internal,
+        // Stage-management internals: manipulate the staging area
+        // itself rather than acting on the staged paths.
         Internal::stage
             | Internal::unstage
             | Internal::toggle_stage
@@ -1093,6 +1095,20 @@ fn is_stage_management_internal(internal: Internal) -> bool {
             | Internal::close_staging_area
             | Internal::toggle_staging_area
             | Internal::focus_staging_area_no_open
+            // Pure navigation internals: move the selection within
+            // the stage panel without acting on the staged paths.
+            // Prompting "Run :line_down on N files?" would be
+            // nonsensical. `select_first` / `select_last` are added
+            // defensively — navigation-shaped, not dispatched by
+            // `stage_state.rs` today.
+            | Internal::line_up
+            | Internal::line_down
+            | Internal::line_up_no_cycle
+            | Internal::line_down_no_cycle
+            | Internal::page_up
+            | Internal::page_down
+            | Internal::select_first
+            | Internal::select_last
     )
 }
 
@@ -1618,6 +1634,29 @@ mod confirm_helper_tests {
             assert!(
                 !is_stage_management_internal(internal),
                 "{internal:?} must NOT be classified as stage-management"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_navigation_internals_are_skipped() {
+        // Pure navigation internals must NOT trigger the bulk-confirm
+        // overlay when the user is on the stage panel with >1 staged
+        // files. Pressing j/k/PgUp/PgDn (and the no-cycle / first /
+        // last variants) is movement, not a fan-out verb dispatch.
+        for internal in [
+            Internal::line_up,
+            Internal::line_down,
+            Internal::line_up_no_cycle,
+            Internal::line_down_no_cycle,
+            Internal::page_up,
+            Internal::page_down,
+            Internal::select_first,
+            Internal::select_last,
+        ] {
+            assert!(
+                is_stage_management_internal(internal),
+                "{internal:?} must be bypassed by the bulk-stage confirm intercept"
             );
         }
     }

@@ -124,10 +124,10 @@ Internal::bulk_rename (stage.len() >= 2)
 - Modify: `src/app/app.rs`
 - Modify: `CLAUDE.md`
 
-- [ ] extend `is_stage_management_internal` at `src/app/app.rs:1083-1097` to include `Internal::line_up | Internal::line_down | Internal::line_up_no_cycle | Internal::line_down_no_cycle | Internal::page_up | Internal::page_down | Internal::select_first | Internal::select_last`
-- [ ] update the prose in the `## Verb confirmation system` section of `CLAUDE.md` to list the navigation internals alongside the stage-management ones, with one sentence on why both are bypassed
-- [ ] write a unit test (alongside or co-located near `maybe_bulk_stage_confirm`) that constructs an app state with stage of 2+ entries and asserts `maybe_bulk_stage_confirm` returns `None` for each of the eight added internals — table-driven over the internal list
-- [ ] run `cargo test` — must pass before next task
+- [x] extend `is_stage_management_internal` at `src/app/app.rs:1083-1097` to include `Internal::line_up | Internal::line_down | Internal::line_up_no_cycle | Internal::line_down_no_cycle | Internal::page_up | Internal::page_down | Internal::select_first | Internal::select_last`
+- [x] update the prose in the `## Verb confirmation system` section of `CLAUDE.md` to list the navigation internals alongside the stage-management ones, with one sentence on why both are bypassed
+- [x] write a unit test (alongside or co-located near `maybe_bulk_stage_confirm`) that constructs an app state with stage of 2+ entries and asserts `maybe_bulk_stage_confirm` returns `None` for each of the eight added internals — table-driven over the internal list
+- [x] run `cargo test` — must pass before next task
 
 ### Task 2: AddOverlay scaffolding + render
 
