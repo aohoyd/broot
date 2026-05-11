@@ -251,11 +251,11 @@ Internal::bulk_rename (stage.len() >= 2)
 - Modify: `README.md` (only if user-facing keybind list lives there)
 - Move: this plan to `docs/plans/completed/`
 
-- [ ] re-read CLAUDE.md updates from Task 1 and Task 7 to make sure they hang together — overlay routing prose should list the four real variants (Confirm, Goto, Add) and the rename apply payload pattern
-- [ ] add a one-line entry under "Overlay routing" naming `pending_bulk_rename` as the rename-apply payload, alongside `skip_confirm` (which is already documented there)
-- [ ] if `README.md` documents default keybinds, add `alt-n` for "create new file or directory"
-- [ ] move this plan: `mkdir -p docs/plans/completed && git mv docs/plans/2026-05-11-modals-and-bulk-rename.md docs/plans/completed/`
-- [ ] also move the design doc: `git mv docs/plans/2026-05-11-modals-and-bulk-rename-design.md docs/plans/completed/`
+- [x] re-read CLAUDE.md updates from Task 1 and Task 7 to make sure they hang together — overlay routing prose should list the four real variants (Confirm, Goto, Add) and the rename apply payload pattern. Updated the enum list at the top of "Overlay routing" from "currently `Confirm`, `Goto`, plus a test-only `Stub`" to "currently `Confirm`, `Goto`, `Add`, plus a test-only `Stub`"; pointer line range refreshed to `mod.rs:127-137`. The Task-7 "Bulk rename" sub-section sits directly below and reads coherently against the updated top.
+- [x] add a one-line entry under "Overlay routing" naming `pending_bulk_rename` as the rename-apply payload, alongside `skip_confirm` (which is already documented there). Added as a continuation of the `CloseAndRun(cmd)` bullet in the `OverlayOutcome` list — describes `App::pending_bulk_rename: Option<RenameRun>` as the sibling payload field and points down to the dedicated sub-section for the full pattern.
+- [x] if `README.md` documents default keybinds, add `alt-n` for "create new file or directory". **Skipped — README does not document keybinds as a reference list.** It only mentions a handful of keys in narrative form (`alt-h`, `alt-i`, `alt-enter`, `ctrl-→`, F5/F6 in examples) tied to feature demos, not a comprehensive table. Adding `alt-n` would be out of place without a keybind list to slot it into. The authoritative keybind reference lives in `resources/default-conf/conf.hjson` and the website docs at dystroy.org/broot/.
+- [x] move this plan: `mkdir -p docs/plans/completed && git mv docs/plans/2026-05-11-modals-and-bulk-rename.md docs/plans/completed/`
+- [x] also move the design doc: `git mv docs/plans/2026-05-11-modals-and-bulk-rename-design.md docs/plans/completed/`
 
 ## Post-Completion
 

@@ -38,10 +38,10 @@ test in `frame.rs` will keep passing because it only checks glyph bytes.
 
 `App::overlay: Option<Overlay>` (`src/app/app.rs:77`) is the only
 floating-modal state. Do not introduce a parallel flag or a stack —
-the variants of `Overlay` (`src/app/overlay/mod.rs:82-90`,
-currently `Confirm`, `Goto`, plus a test-only `Stub`) cover every
-floating-modal need we have, and the rest of the routing assumes
-"at most one".
+the variants of `Overlay` (`src/app/overlay/mod.rs:127-137`,
+currently `Confirm`, `Goto`, `Add`, plus a test-only `Stub`) cover
+every floating-modal need we have, and the rest of the routing
+assumes "at most one".
 
 Render hook: `display_panels` post-passes the overlay after every panel
 has been drawn (`src/app/app.rs:784` and `:794` pass
@@ -60,6 +60,11 @@ handler runs (`src/app/app.rs:672-704`):
   (`src/app/app.rs:83`, cleared at `:191`) is the loop-avoidance
   signal — without it the destructive verb would re-open the same
   overlay. Cleared unconditionally on every dispatch.
+  `App::pending_bulk_rename: Option<RenameRun>` is the sibling
+  payload field for bulk rename — the rename plan rides through the
+  same `CloseAndRun(":bulk_rename_apply")` re-dispatch but lives on
+  `App` rather than inside the command (see the "Bulk rename"
+  sub-section below for the full pattern).
 - `CloseAndFocus(path)` — overlay dropped, a synthetic `:focus <path>`
   `VerbInvocation` is dispatched.
 
