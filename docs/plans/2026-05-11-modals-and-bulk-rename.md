@@ -197,18 +197,18 @@ Internal::bulk_rename (stage.len() >= 2)
 - Create: `src/bulk_rename/mod.rs`
 - Modify: `src/main.rs` or `src/lib.rs` (whichever lists top-level modules)
 
-- [ ] register `pub mod bulk_rename;` in the top-level module list
-- [ ] create `src/bulk_rename/mod.rs` with `pub fn serialize(stage: &[PathBuf]) -> String` — one line per path, no trailing newline policy: emit `path.display()` followed by `\n`
-- [ ] add `pub fn parse(edited: &str) -> Vec<String>` — split on `\n`, trim trailing whitespace, skip blank lines and lines whose first non-whitespace char is `#`
-- [ ] add `pub struct RenameRun { pub renames: Vec<(PathBuf, PathBuf)> }`
-- [ ] add `pub enum BulkRenameError { LineCountMismatch { expected, got }, EmptyTarget { line }, DuplicateTarget { name }, ExternalCollision { target } }` with `Display` impl producing one-line messages suitable for the status row
-- [ ] add `pub fn plan(stage: &[PathBuf], edited_lines: &[String], existing: &dyn Fn(&Path) -> bool) -> Result<RenameRun, BulkRenameError>`; rules in order: line count match, no empty target, no duplicate target, no external collision; filter out unchanged pairs before returning
-- [ ] write unit test: `serialize` then `parse` round-trips a stage of three paths
-- [ ] write unit test: each of the four `BulkRenameError` variants fires on a targeted input
-- [ ] write unit test: cycle case `a → b, b → a` produces a `RenameRun` with both entries (apply-phase cycle handling is verified in Task 7)
-- [ ] write unit test: an unchanged line (target equals source) is filtered from `renames`
-- [ ] write unit test: `parse` skips `#`-comment lines and blank lines
-- [ ] run `cargo test` — must pass before next task
+- [x] register `pub mod bulk_rename;` in the top-level module list
+- [x] create `src/bulk_rename/mod.rs` with `pub fn serialize(stage: &[PathBuf]) -> String` — one line per path, no trailing newline policy: emit `path.display()` followed by `\n`
+- [x] add `pub fn parse(edited: &str) -> Vec<String>` — split on `\n`, trim trailing whitespace, skip blank lines and lines whose first non-whitespace char is `#`
+- [x] add `pub struct RenameRun { pub renames: Vec<(PathBuf, PathBuf)> }`
+- [x] add `pub enum BulkRenameError { LineCountMismatch { expected, got }, EmptyTarget { line }, DuplicateTarget { name }, ExternalCollision { target } }` with `Display` impl producing one-line messages suitable for the status row
+- [x] add `pub fn plan(stage: &[PathBuf], edited_lines: &[String], existing: &dyn Fn(&Path) -> bool) -> Result<RenameRun, BulkRenameError>`; rules in order: line count match, no empty target, no duplicate target, no external collision; filter out unchanged pairs before returning
+- [x] write unit test: `serialize` then `parse` round-trips a stage of three paths
+- [x] write unit test: each of the four `BulkRenameError` variants fires on a targeted input
+- [x] write unit test: cycle case `a → b, b → a` produces a `RenameRun` with both entries (apply-phase cycle handling is verified in Task 7)
+- [x] write unit test: an unchanged line (target equals source) is filtered from `renames`
+- [x] write unit test: `parse` skips `#`-comment lines and blank lines
+- [x] run `cargo test` — must pass before next task
 
 ### Task 7: Bulk rename routing + apply
 
