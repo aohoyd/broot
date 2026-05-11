@@ -863,6 +863,13 @@ mod bulk_rename_routing_tests {
             "Internal::bulk_rename must accept any selection; \
              a stricter condition would let find_key_verb skip past it",
         );
+        assert!(
+            first_f2_verb.panels.is_empty(),
+            "Internal::bulk_rename must not restrict to specific panels; \
+             a panel filter would let find_key_verb skip past it (the \
+             three filters in find_key_verb are selection_condition, \
+             file_extensions, and panels — all three must be permissive)",
+        );
     }
 
     /// The continuation `bulk_rename_apply` is intentionally unbound:

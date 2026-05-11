@@ -1542,49 +1542,10 @@ mod tests {
         assert_eq!(target, root.to_path_buf());
     }
 
-    //
-    // Routing test: Internal::add on a browser state opens an Add overlay.
-    //
-    // We exercise the dispatch through `BrowserState::on_internal` by
-    // building a fake state with a directory selected and a tempdir-backed
-    // root, then asserting the returned `CmdResult` is
-    // `CmdResult::OpenOverlay(Overlay::Add(_))` whose `target_dir` matches
-    // the resolution rule.
-    //
-    // We can't easily call `on_internal` directly because it needs a
-    // `CmdContext` + `AppState`. Instead, we exercise the same exact code
-    // path the arm runs by composing `resolve_add_target_dir` + `AddOverlay::new`
-    // and matching on the resulting overlay variant — this mirrors the
-    // three-line arm body verbatim. The arm itself is otherwise trivially
-    // straight-line code.
-    //
-
-    #[test]
-    fn add_routing_directory_selection_targets_selection() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        let dir = root.join("subdir");
-        fs::create_dir(&dir).expect("mkdir");
-        let target_dir = resolve_add_target_dir(&dir, root);
-        let overlay = Overlay::Add(AddOverlay::new(target_dir.clone()));
-        match overlay {
-            Overlay::Add(ov) => assert_eq!(ov.target_dir, dir),
-            _ => panic!("expected Overlay::Add"),
-        }
-    }
-
-    #[test]
-    fn add_routing_file_selection_targets_parent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        let file = root.join("a.txt");
-        fs::write(&file, b"x").expect("write");
-        let target_dir = resolve_add_target_dir(&file, root);
-        let overlay = Overlay::Add(AddOverlay::new(target_dir.clone()));
-        match overlay {
-            Overlay::Add(ov) => assert_eq!(ov.target_dir, root.to_path_buf()),
-            _ => panic!("expected Overlay::Add"),
-        }
-    }
-
+    // Routing for `Internal::add` is exercised through the
+    // `resolve_add_target_dir_*` tests above — the arm body is a
+    // three-line `Overlay::Add(AddOverlay::new(resolve_add_target_dir(...)))`
+    // composition with no additional logic to pin, so a separate test
+    // just wrapping the helper output in `Overlay::Add` would duplicate
+    // the existing coverage.
 }

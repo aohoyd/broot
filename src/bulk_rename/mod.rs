@@ -55,12 +55,14 @@ pub fn serialize(stage: &[PathBuf]) -> String {
 /// - Whitespace inside each line is preserved verbatim — a filename may
 ///   legitimately begin or end with a space, and `trim_end` would
 ///   silently corrupt those paths into different ones.
-/// - Skips fully blank lines and lines whose first non-whitespace
-///   character is `#` (comments).
+/// - Skips fully blank lines (including whitespace-only lines, which
+///   would otherwise reach `plan` and surface as `EmptyTarget` — a
+///   worse error than dropping the line) and lines whose first
+///   non-whitespace character is `#` (comments).
 pub fn parse(edited: &str) -> Vec<String> {
     edited
         .lines()
-        .filter(|l| !l.is_empty() && !l.trim_start().starts_with('#'))
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .map(|l| l.to_string())
         .collect()
 }
@@ -443,6 +445,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_drops_whitespace_only_lines() {
+        // A whitespace-only line is not a legal filename and not a
+        // meaningful entry — drop it the same way fully blank lines
+        // are dropped. Without this filter the line would reach `plan`
+        // and surface as a less-helpful `EmptyTarget` error.
+        let input = "a\n   \nb\n\t\t\n";
+        let parsed = parse(input);
+        assert_eq!(parsed, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
     fn parse_preserves_trailing_space_in_filename() {
         // Regression pin: a previous version of `parse` stripped
         // trailing whitespace, which corrupted unusual but valid POSIX
@@ -608,18 +621,20 @@ mod apply_tests {
         assert_eq!(failed_path, expected_stale_tmp);
         assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
 
-        // Documented "no rollback" semantics:
-        //   - The parent rename (iter 2) stayed applied: `c` is now a
+        // Documented "no rollback" semantics. The setup block above
+        // numbers renames 1-based — keep the same numbering here so the
+        // comments line up with the labels just above.
+        //   - The parent rename (iter 3) stayed applied: `c` is now a
         //     directory containing the orphaned temp under its new path.
-        //   - `b` is gone (renamed in iter 1).
+        //   - `b` is gone (renamed in iter 2).
         //   - The original `a` location is empty.
-        assert!(c.is_dir(), "iter 2 rename (a -> c) must have applied");
+        assert!(c.is_dir(), "iter 3 rename (a -> c) must have applied");
         assert!(
             c.join("x.broot-bulk-tmp-0").exists(),
             "phase-1 temp must be on disk under its post-parent-rename path",
         );
-        assert!(!b.exists(), "iter 1 rename (b -> a/x) ran; b is gone");
-        assert!(!a_dir.exists(), "iter 2 rename moved a away; original is gone");
+        assert!(!b.exists(), "iter 2 rename (b -> a/x) ran; b is gone");
+        assert!(!a_dir.exists(), "iter 3 rename moved a away; original is gone");
     }
 
     /// Three files; middle target points into a non-existent directory

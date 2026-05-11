@@ -22,6 +22,7 @@
 
 use {
     super::{
+        ButtonHits,
         CellGetCloned,
         OverlayOutcome,
         OverlayState,
@@ -70,14 +71,6 @@ use {
 pub(crate) enum ConfirmFocus {
     Cancel,
     Confirm,
-}
-
-/// Hit-test rectangles for the two buttons. Recomputed on every render
-/// and consulted by `handle_mouse` to translate clicks into outcomes.
-#[derive(Debug, Clone)]
-pub(crate) struct ButtonHits {
-    pub(crate) cancel: Area,
-    pub(crate) confirm: Area,
 }
 
 /// A yes/no confirmation modal.

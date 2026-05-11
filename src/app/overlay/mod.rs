@@ -76,6 +76,20 @@ impl<T: Clone> CellGetCloned<T> for Cell<Option<T>> {
     }
 }
 
+/// Hit-test rectangles for the two buttons of a two-button modal.
+/// Recomputed on every render and consulted by `handle_mouse` to
+/// translate clicks into outcomes.
+///
+/// Shared by `ConfirmOverlay` and `AddOverlay`. Both modals have the
+/// same shape — a Cancel button on the left, an action button on the
+/// right — so they share one struct rather than carrying two identical
+/// copies.
+#[derive(Debug, Clone)]
+pub(crate) struct ButtonHits {
+    pub(crate) cancel: Area,
+    pub(crate) confirm: Area,
+}
+
 /// Behaviour every overlay variant implements.
 ///
 /// `render` is called by `display_panels` after all panels have been

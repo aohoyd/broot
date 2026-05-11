@@ -18,6 +18,7 @@
 
 use {
     super::{
+        ButtonHits,
         CellGetCloned,
         OverlayOutcome,
         OverlayState,
@@ -74,19 +75,6 @@ use {
 pub(crate) enum AddFocus {
     Cancel,
     Create,
-}
-
-/// Hit-test rectangles for the two buttons. Recomputed on every render
-/// and consulted by `handle_mouse` to translate clicks into outcomes.
-///
-/// Intentionally a local copy of the same shape used by
-/// `ConfirmOverlay::ButtonHits` rather than a shared import: the cost
-/// of cross-module visibility plumbing for a 4-line struct is higher
-/// than the cost of the duplication.
-#[derive(Debug, Clone)]
-pub(crate) struct ButtonHits {
-    pub(crate) cancel: Area,
-    pub(crate) confirm: Area,
 }
 
 /// A free-text overlay that asks for a filename relative to
@@ -566,17 +554,12 @@ mod tests {
     #[test]
     fn render_caches_button_hits() {
         let o = make();
-        assert!(o.button_hits.take().is_none());
-        // `take` above emptied the cache; restore None and re-render so
-        // we observe the actual render-time population.
-        o.button_hits.set(None);
+        assert!(o.button_hits.get_cloned().is_none());
         let _ = render_to_string(&o);
-        let hits = {
-            let v = o.button_hits.take();
-            o.button_hits.set(v.clone());
-            v
-        }
-        .expect("hits should be populated after render");
+        let hits = o
+            .button_hits
+            .get_cloned()
+            .expect("hits should be populated after render");
         assert!(hits.cancel.width > 0, "cancel hit-rect must have width");
         assert!(hits.confirm.width > 0, "create hit-rect must have width");
         let cancel_right = hits.cancel.left + hits.cancel.width;
