@@ -135,13 +135,13 @@ Internal::bulk_rename (stage.len() >= 2)
 - Create: `src/app/overlay/add.rs`
 - Modify: `src/app/overlay/mod.rs`
 
-- [ ] create `src/app/overlay/add.rs` with `AddOverlay` struct (fields per Technical Details), `ButtonHits` reusing the same shape as `confirm.rs`, and a `new(target_dir: PathBuf)` constructor
-- [ ] implement `OverlayState::render` painting: frame + title `"New file or directory"`, "in: <target_dir>" line, input cursor row with current `input` and visible cursor glyph, hint row (either "(trailing / creates a directory)" or `self.error` if present), Cancel + Create buttons; cache `button_hits` via `Cell`
-- [ ] wire the new `Add(AddOverlay)` variant into `Overlay` enum at `src/app/overlay/mod.rs:124` and into the three dispatch shims at lines 144/157/169
-- [ ] re-export `AddOverlay` from the overlay module (mirror `pub use confirm::ConfirmOverlay;`)
-- [ ] write render-shape tests using the `BufWriter<Sink>::buffer()` pattern from `confirm.rs`: assert frame corners present, title text present, "Cancel" and "Create" labels present, `button_hits` populated and non-overlapping after render
-- [ ] write a test that the overlay renders the `error` message in place of the hint when `self.error` is `Some`
-- [ ] run `cargo test` — must pass before next task
+- [x] create `src/app/overlay/add.rs` with `AddOverlay` struct (fields per Technical Details), `ButtonHits` reusing the same shape as `confirm.rs`, and a `new(target_dir: PathBuf)` constructor
+- [x] implement `OverlayState::render` painting: frame + title `"New file or directory"`, "in: <target_dir>" line, input cursor row with current `input` and visible cursor glyph, hint row (either "(trailing / creates a directory)" or `self.error` if present), Cancel + Create buttons; cache `button_hits` via `Cell`
+- [x] wire the new `Add(AddOverlay)` variant into `Overlay` enum at `src/app/overlay/mod.rs:124` and into the three dispatch shims at lines 144/157/169
+- [x] re-export `AddOverlay` from the overlay module (mirror `pub use confirm::ConfirmOverlay;`)
+- [x] write render-shape tests using the `BufWriter<Sink>::buffer()` pattern from `confirm.rs`: assert frame corners present, title text present, "Cancel" and "Create" labels present, `button_hits` populated and non-overlapping after render
+- [x] write a test that the overlay renders the `error` message in place of the hint when `self.error` is `Some`
+- [x] run `cargo test` — must pass before next task
 
 ### Task 3: AddOverlay input handling + filesystem commit
 

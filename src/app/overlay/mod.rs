@@ -10,9 +10,11 @@
 //! of, and the [`OverlayOutcome`] returned by event handlers — plus a
 //! `#[cfg(test)]` stub used by the routing tests.
 
+mod add;
 mod confirm;
 mod goto;
 
+pub use add::AddOverlay;
 pub use confirm::ConfirmOverlay;
 pub use goto::GotoOverlay;
 // `ConfirmFocus` is an internal detail of the confirm overlay (the
@@ -118,6 +120,7 @@ pub trait OverlayState {
 ///   (Task 7); wired into rm/trash, mv/cp overwrite and bulk staging
 ///   by later tasks.
 /// - `Goto(GotoOverlay)` — bookmark jump menu (Task 12).
+/// - `Add(AddOverlay)` — create file or directory modal.
 ///
 /// The `Stub` variant is test-only and exists so the dispatch shims
 /// can be exercised before the real variants land.
@@ -126,6 +129,8 @@ pub enum Overlay {
     Confirm(ConfirmOverlay),
     /// Bookmark / goto modal.
     Goto(GotoOverlay),
+    /// Create file or directory modal.
+    Add(AddOverlay),
     /// Test-only variant for routing tests.
     #[cfg(test)]
     Stub(StubOverlay),
@@ -144,6 +149,7 @@ impl Overlay {
         match self {
             Overlay::Confirm(o) => o.render(w, screen, palette),
             Overlay::Goto(o) => o.render(w, screen, palette),
+            Overlay::Add(o) => o.render(w, screen, palette),
             #[cfg(test)]
             Overlay::Stub(s) => s.render(w, screen, palette),
         }
@@ -157,6 +163,7 @@ impl Overlay {
         match self {
             Overlay::Confirm(o) => o.handle_key(key),
             Overlay::Goto(o) => o.handle_key(key),
+            Overlay::Add(o) => o.handle_key(key),
             #[cfg(test)]
             Overlay::Stub(s) => s.handle_key(key),
         }
@@ -170,6 +177,7 @@ impl Overlay {
         match self {
             Overlay::Confirm(o) => o.handle_mouse(ev),
             Overlay::Goto(o) => o.handle_mouse(ev),
+            Overlay::Add(o) => o.handle_mouse(ev),
             #[cfg(test)]
             Overlay::Stub(s) => s.handle_mouse(ev),
         }
