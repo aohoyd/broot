@@ -1422,4 +1422,31 @@ mod tests {
             "click at body_top should select the first child",
         );
     }
+
+    #[test]
+    fn on_double_click_body_row_mismatch_does_not_navigate() {
+        // `on_double_click` only opens the selected line when the recomputed
+        // `line_index` matches the current selection (a real double-click
+        // always follows a single click at the same y, so a mismatch means
+        // the click wasn't on a selectable/openable line and we must NOT
+        // call `open_selection_stay_in_broot` — that would touch the
+        // filesystem and is moot anyway.
+        //
+        // body_top = 3, click at y = body_top (=3) → body_y = 0 → line_index
+        // = 1. We pre-set selection to 2, so the mismatch branch is taken
+        // and the function returns `CmdResult::Keep` without filesystem I/O.
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 2;
+        let con = AppContext::default();
+        let screen = Screen { width: 80, height: 24 };
+        let res = state
+            .on_double_click(0, 3, screen, &con)
+            .expect("on_double_click ok");
+        assert!(matches!(res, CmdResult::Keep));
+        assert_eq!(
+            state.displayed_tree().selection,
+            2,
+            "mismatch branch must leave selection untouched",
+        );
+    }
 }

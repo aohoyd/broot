@@ -150,16 +150,24 @@ pub(crate) fn draw_frame_title<W: Write>(
         return Ok(());
     }
 
-    let overlay: Option<termimad::CompoundStyle> = if selected {
-        let mut s = palette.frame_title.clone();
+    // Three logical outcomes, three distinct code paths:
+    // * selected + selected_line has a bg → clone frame_title and overlay
+    //   the bg (the only case that allocates),
+    // * selected but selected_line has no bg → reuse frame_title unchanged,
+    // * unselected → reuse frame_title unchanged.
+    let owned: termimad::CompoundStyle;
+    let style_ref: &termimad::CompoundStyle = if selected {
         if let Some(bg) = palette.selected_line.get_bg() {
+            let mut s = palette.frame_title.clone();
             s.set_bg(bg);
+            owned = s;
+            &owned
+        } else {
+            &palette.frame_title
         }
-        Some(s)
     } else {
-        None
+        &palette.frame_title
     };
-    let style_ref = overlay.as_ref().unwrap_or(&palette.frame_title);
 
     w.queue(cursor::MoveTo(area.left + 1, area.top))?;
     style_ref.queue(w, ' ').map_err(io_err)?;
