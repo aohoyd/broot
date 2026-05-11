@@ -112,6 +112,18 @@ You can opt your own external verbs into this prompt with
 verb block (see [Verb definition attributes](https://dystroy.org/broot/conf_verbs/#verb-definition-attributes)
 on the docs site).
 
+Press <kbd>alt</kbd><kbd>n</kbd> to create a new file or directory
+inside the currently selected directory (or alongside the current
+selection if it is a file). A trailing slash creates a directory; any
+other name creates a regular file. The modal refuses to overwrite an
+existing entry — pick a different name, or delete the existing entry
+first.
+
+With two or more paths staged, press <kbd>F2</kbd> to open them in
+`$EDITOR` for bulk rename. Edit the destination names, save and quit
+the editor, then confirm the diff to apply. With zero or one staged
+path, <kbd>F2</kbd> opens the existing inline rename prompt.
+
 ## Goto bookmarks
 
 Press <kbd>g</kbd> from the tree to open the bookmarks goto modal.
