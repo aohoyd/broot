@@ -237,12 +237,12 @@ Internal::bulk_rename (stage.len() >= 2)
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: stage nav doesn't trigger confirm, `alt-n` opens Add modal, `:rename` is context-aware
-- [ ] verify edge cases: tiny terminal (Add modal bails like Confirm does for `width < 8 || height < 5`), $EDITOR unset → status-row error, all four `BulkRenameError` variants surface in status row
-- [ ] run full test suite: `cargo test --all`
-- [ ] run `cargo clippy --all-targets -- -D warnings`
-- [ ] run `cargo build --release` to confirm release build still compiles
-- [ ] verify test coverage of overlay routing, validation, and apply paths matches the depth of `src/app/overlay/confirm.rs:560-700`
+- [x] verify all requirements from Overview are implemented: stage nav doesn't trigger confirm (`is_stage_management_internal` covers 8 nav internals + 10 stage internals, pinned by `stage_navigation_internals_are_skipped`), `alt-n` opens Add modal (`add_internal(add).with_key(key!(alt - n))` at `verb_store.rs:292`, `Internal::add` arm in `BrowserState::on_internal` at `browser_state.rs:803`), `:rename` is context-aware (`run_bulk_rename` at `app.rs:729` falls through to external rename for `stage.len() < 2`, else opens `$EDITOR` flow + confirm-with-diff)
+- [x] verify edge cases: tiny terminal (Add modal bails at `width < 8 || height < 5` — `add.rs:229`, pinned by `render_too_small_is_noop`), $EDITOR unset → status-row error (`run_bulk_rename` surfaces `editor::edit_in_external` `Err` via `set_error("bulk rename: {e}")` at `app.rs:762`; documented msg `"set $EDITOR to enable this feature"` pinned by `edit_in_external_returns_documented_err_when_editor_unset`), all four `BulkRenameError` variants surface in status row (`bulk_rename::plan` `Err` mapped via `e.to_string()` at `app.rs:770`; Display impl covers `LineCountMismatch` / `EmptyTarget` / `DuplicateTarget` / `ExternalCollision` at `bulk_rename/mod.rs:94-115`; pinned by `display_messages_render_one_line_status_strings`)
+- [x] run full test suite: `cargo test --all` — 380 tests pass (lib 343 + integration: confirm_destructive 24, goto_bookmarks 6, search_strings 7), 0 failures
+- [x] run `cargo clippy --all-targets -- -D warnings` — 46 warnings remain, all pre-existing (`goto.rs:679` `unused_parens`, `mod.rs:385` `dead_code`, `mod.rs:1` `module_inception`, etc.); one new warning introduced by Task 3 in `add.rs:198-211` (`bind_instead_of_map` on `and_then` returning `Some`) was fixed in this task
+- [x] run `cargo build --release` to confirm release build still compiles — clean `Finished release profile [optimized]`
+- [x] verify test coverage of overlay routing, validation, and apply paths matches the depth of `src/app/overlay/confirm.rs:560-700` — `add.rs`: 41 tests (render, input, validation, commit, mouse — surpasses the 22-test reference in `confirm.rs`); `editor.rs`: 2 tests (round-trip + documented-err); `bulk_rename/mod.rs`: 13 tests (10 plan/parse/serialize + 3 apply integration with `tempdir`); `app.rs` `bulk_rename_routing_tests`: 5 tests (`resolved_internal` × 4 shapes + branching); `verb_store.rs`: F2 precedence pin + `bulk_rename_apply_has_no_key_binding` pin; `browser_state.rs`: 3 add-routing tests
 
 ### Task 9: Update documentation and finalize
 

@@ -199,13 +199,13 @@ impl AddOverlay {
         self.input
             .char_indices()
             .find(|(i, _)| *i >= self.cursor)
-            .and_then(|(i, c)| {
+            .map(|(i, c)| {
                 if i == self.cursor {
-                    Some(i + c.len_utf8())
+                    i + c.len_utf8()
                 } else {
                     // Cursor was mid-char (shouldn't happen given we
                     // only ever set it to a boundary); snap forward.
-                    Some(i)
+                    i
                 }
             })
     }
