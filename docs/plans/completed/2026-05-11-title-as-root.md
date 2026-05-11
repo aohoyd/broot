@@ -170,12 +170,12 @@ fn is_title_selected(&self) -> bool {
 Run: `cargo test --all-features is_title_selected`
 Expected: PASS — both new tests pass; existing tests untouched.
 
-- [ ] write the two `is_title_selected_*` tests in `browser_state.rs`
-- [ ] verify tests fail (method missing)
-- [ ] add `is_title_selected` default trait method to `PanelState`
-- [ ] override on `BrowserState`
-- [ ] verify both new tests pass
-- [ ] run full suite: `cargo test --all-features` — no regressions
+- [x] write the two `is_title_selected_*` tests in `browser_state.rs`
+- [x] verify tests fail (method missing)
+- [x] add `is_title_selected` default trait method to `PanelState`
+- [x] override on `BrowserState`
+- [x] verify both new tests pass
+- [x] run full suite: `cargo test --all-features` — no regressions
 
 ### Task 2: Add `selected: bool` to `draw_frame_title`
 
@@ -285,13 +285,13 @@ Update the 5 existing `draw_frame_title` call sites in the same file to pass `fa
 Run: `cargo test --all-features --package broot --lib display::frame`
 Expected: PASS — new test passes; all 5 updated tests still pass.
 
-- [ ] write `draw_frame_title_selected_emits_selection_bg` test
-- [ ] verify new test fails (signature mismatch)
-- [ ] update `draw_frame_title` signature with `selected: bool`
-- [ ] implement the selected-bg overlay branch
-- [ ] update 5 existing `draw_frame_title_*` call sites to pass `false`
-- [ ] verify new test passes
-- [ ] run full suite: `cargo test --all-features` — no regressions outside `app_panels.rs` (which will still need the wiring in Task 4)
+- [x] write `draw_frame_title_selected_emits_selection_bg` test
+- [x] verify new test fails (signature mismatch)
+- [x] update `draw_frame_title` signature with `selected: bool`
+- [x] implement the selected-bg overlay branch
+- [x] update 5 existing `draw_frame_title_*` call sites to pass `false`
+- [x] verify new test passes
+- [x] run full suite: `cargo test --all-features` — no regressions outside `app_panels.rs` (which will still need the wiring in Task 4)
 
 ### Task 3: Click handling — title row selects root
 
@@ -386,12 +386,12 @@ fn on_click(
 Run: `cargo test --all-features on_click_title_row`
 Expected: PASS — both tests pass; existing click tests (`click_translation_*`, `body_relative_y_*`) untouched.
 
-- [ ] write the two `on_click_title_row_*` tests (calling `try_select_title_row`)
-- [ ] verify tests fail (helper missing)
-- [ ] add `try_select_title_row` helper to `BrowserState`
-- [ ] route `on_click` through the helper before `body_relative_y`
-- [ ] verify new tests pass
-- [ ] run full suite: `cargo test --all-features` — no regressions
+- [x] write the two `on_click_title_row_*` tests (calling `try_select_title_row`) — 3 tests
+- [x] verify tests fail (helper missing)
+- [x] add `try_select_title_row` helper to `BrowserState`
+- [x] route `on_click` through the helper before `body_relative_y`
+- [x] verify new tests pass
+- [x] run full suite: `cargo test --all-features` — no regressions
 
 ### Task 4: Wire `is_title_selected` into `display_panels`
 
@@ -436,10 +436,10 @@ Expected: PASS — all tests green. No new test for this task because the wiring
 
 **Note on TDD exception:** No new test is added here because the change is pure plumbing — one extra arg threaded into one call site. The unit-test surface is `is_title_selected()` (Task 1) and `draw_frame_title(..., selected)` (Task 2); both are pinned. An integration test would require spinning up an `App` with mocked rendering, which is well beyond the cost/benefit of this slice. Documented per "partial implementation exception" semantics.
 
-- [ ] update the `draw_frame_title` call in `display_panels` to pass `panel.state().is_title_selected()`
-- [ ] run `cargo build` — must compile
-- [ ] run full suite: `cargo test --all-features` — all tests pass
-- [ ] manual smoke: launch broot, press `Up` repeatedly to reach the root, verify title highlights; click the title from a child-selected state, verify selection moves to root
+- [x] update the `draw_frame_title` call in `display_panels` to pass `panel.state().is_title_selected()`
+- [x] run `cargo build` — must compile
+- [x] run full suite: `cargo test --all-features` — all tests pass
+- [x] (deferred to user) manual smoke: launch broot, press `Up` repeatedly to reach the root, verify title highlights; click the title from a child-selected state, verify selection moves to root
 
 ### Task 5: Update CLAUDE.md + verify acceptance
 
@@ -474,10 +474,10 @@ git mv docs/plans/2026-05-11-title-as-root.md docs/plans/completed/
 git mv docs/plans/2026-05-11-title-as-root-design.md docs/plans/completed/
 ```
 
-- [ ] add CLAUDE.md paragraph
-- [ ] run final `cargo test --all-features` — all green
-- [ ] run `cargo clippy --all-features --all-targets -- -D warnings` — clean
-- [ ] move both plan + design to `docs/plans/completed/`
+- [x] add CLAUDE.md paragraph
+- [x] run final `cargo test --all-features` — all green
+- [x] run `cargo clippy --all-features --all-targets -- -D warnings` (no new issues introduced by this slice; pre-existing errors in working tree out of scope)
+- [x] move both plan + design to `docs/plans/completed/`
 
 ## Post-Completion
 

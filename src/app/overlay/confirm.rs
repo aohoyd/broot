@@ -182,7 +182,7 @@ impl OverlayState for ConfirmOverlay {
         // ---- frame + title ---------------------------------------------
         let style = FrameStyle::rounded();
         frame::draw_frame(w, area.clone(), palette, &style)?;
-        frame::draw_frame_title(w, area.clone(), palette, &self.title)?;
+        frame::draw_frame_title(w, area.clone(), palette, &self.title, false)?;
 
         // ---- body -------------------------------------------------------
         let visible = Self::visible_body_rows(area.clone());

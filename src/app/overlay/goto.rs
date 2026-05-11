@@ -192,7 +192,7 @@ impl OverlayState for GotoOverlay {
         // ---- frame + title -------------------------------------------
         let style = FrameStyle::rounded();
         frame::draw_frame(w, area.clone(), palette, &style)?;
-        frame::draw_frame_title(w, area.clone(), palette, " Goto ")?;
+        frame::draw_frame_title(w, area.clone(), palette, " Goto ", false)?;
 
         // ---- rows ----------------------------------------------------
         let inner_left = area.left + 1;
