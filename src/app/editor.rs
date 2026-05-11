@@ -78,7 +78,13 @@ pub fn edit_in_external(
     // The toggle and the guard both skip when stderr is not a TTY — required
     // to keep `cargo test` output clean (otherwise we'd spray escape codes
     // into the test harness's captured stderr).
+    //
+    // CRITICAL: the guard MUST be installed before any of the fallible
+    // toggle steps run. If e.g. `disable_raw_mode()` fails after we've
+    // already shown the cursor and left the alternate screen, we still
+    // need the Drop impl to put the TUI back together on the `?`-return.
     let is_tty = stderr().is_terminal();
+    let _guard = TerminalRestoreGuard { is_tty };
     if is_tty {
         let mut w = stderr();
         w.queue(cursor::Show)?;
@@ -86,7 +92,6 @@ pub fn edit_in_external(
         terminal::disable_raw_mode()?;
         w.flush()?;
     }
-    let _guard = TerminalRestoreGuard { is_tty };
 
     let status = Command::new(&exe)
         .args(&extra_args)
@@ -114,9 +119,21 @@ fn resolve_editor() -> io::Result<String> {
             });
         }
     }
-    std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .ok()
+    resolve_editor_from_env(
+        std::env::var("VISUAL").ok(),
+        std::env::var("EDITOR").ok(),
+    )
+}
+
+/// Pure-function resolver: `$VISUAL` wins over `$EDITOR`; whitespace-only
+/// strings are treated as unset. Factored out so tests can exercise the
+/// precedence rules without touching the process environment.
+fn resolve_editor_from_env(
+    visual: Option<String>,
+    editor: Option<String>,
+) -> io::Result<String> {
+    visual
+        .or(editor)
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             io::Error::new(
@@ -191,7 +208,6 @@ mod tests {
             .find(|p| std::path::Path::new(p).exists())
             .expect("no `true` binary found on this system");
         test_support::set_override(Some((*true_path).to_string()));
-        // (`set_override(Some(s))` => use `s`; `set_override(None)` => force-unset.)
         let result = edit_in_external("hello", ".test");
         test_support::clear_override();
         let out = result.expect("editor helper should succeed with the no-op editor");
@@ -209,5 +225,68 @@ mod tests {
         let err = result.expect_err("expected Err when editor is unset");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert_eq!(err.to_string(), "set $EDITOR to enable this feature");
+    }
+
+    // -------------------------------------------------------------
+    // resolve_editor_from_env: pure-function resolution rules
+    // -------------------------------------------------------------
+
+    #[test]
+    fn resolve_prefers_visual_over_editor() {
+        // Both set — VISUAL wins, EDITOR is ignored.
+        let r = resolve_editor_from_env(
+            Some("vim".to_string()),
+            Some("nano".to_string()),
+        );
+        assert_eq!(r.expect("VISUAL must win"), "vim");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_editor_when_visual_unset() {
+        let r = resolve_editor_from_env(None, Some("nano".to_string()));
+        assert_eq!(r.expect("EDITOR must be returned"), "nano");
+    }
+
+    #[test]
+    fn resolve_rejects_whitespace_only_editor() {
+        // Both set to whitespace — must return the documented "unset" Err
+        // (not a whitespace string that would later fail to launch).
+        let r = resolve_editor_from_env(
+            Some("   ".to_string()),
+            Some("\t\n".to_string()),
+        );
+        let err = r.expect_err("whitespace-only must count as unset");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn resolve_returns_err_when_both_unset() {
+        let r = resolve_editor_from_env(None, None);
+        let err = r.expect_err("unset must return documented Err");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    // -------------------------------------------------------------
+    // edit_in_external: non-zero exit surfaces as io::Error::other
+    // -------------------------------------------------------------
+
+    #[test]
+    fn edit_in_external_non_zero_exit_returns_error() {
+        let _g = TEST_LOCK.lock().unwrap();
+        // `false` exits with status 1 unconditionally. The helper must
+        // map that into an io::Error rather than silently returning the
+        // (untouched) temp-file content.
+        let false_path = ["/bin/false", "/usr/bin/false"]
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .expect("no `false` binary found on this system");
+        test_support::set_override(Some((*false_path).to_string()));
+        let result = edit_in_external("hello", ".test");
+        test_support::clear_override();
+        let err = result.expect_err("non-zero exit must surface as Err");
+        assert!(
+            err.to_string().contains("editor exited with"),
+            "error message must explain the failure: {err}",
+        );
     }
 }

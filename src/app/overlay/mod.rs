@@ -2,8 +2,8 @@
 //!
 //! The overlay sits on top of the regular panel rendering and, when
 //! present, captures input. Confirmation modals ([`ConfirmOverlay`]) and
-//! the Goto/Bookmarks modal (Task 12) are implemented as overlay
-//! variants.
+//! the Goto/Bookmarks modal ([`GotoOverlay`]) are implemented as
+//! overlay variants.
 //!
 //! This module defines the contract — the [`OverlayState`] trait, the
 //! [`Overlay`] enum that the [`App`](crate::app::App) holds at most one
@@ -117,9 +117,8 @@ pub trait OverlayState {
 /// The single overlay (if any) the `App` is currently displaying.
 ///
 /// - `Confirm(ConfirmOverlay)` — yes/no destructive-action prompt
-///   (Task 7); wired into rm/trash, mv/cp overwrite and bulk staging
-///   by later tasks.
-/// - `Goto(GotoOverlay)` — bookmark jump menu (Task 12).
+///   used for rm/trash, mv/cp overwrite and bulk staging.
+/// - `Goto(GotoOverlay)` — bookmark jump menu.
 /// - `Add(AddOverlay)` — create file or directory modal.
 ///
 /// The `Stub` variant is test-only and exists so the dispatch shims

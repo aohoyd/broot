@@ -1587,32 +1587,4 @@ mod tests {
         }
     }
 
-    //
-    // Non-browser panel test: Internal::add must be a no-op for panels
-    // whose `on_internal` doesn't match it and which fall through to
-    // `on_internal_generic`. The generic returns `CmdResult::Keep` for
-    // unknown internals (`_ => CmdResult::Keep` at panel_state.rs:848).
-    //
-    // We pin this by reflecting the documented behaviour rather than
-    // spinning up a Stage/Preview/etc. fixture (each requires substantial
-    // setup). If the wildcard arm in `on_internal_generic` is ever
-    // changed, the assertion below will need updating alongside it —
-    // which is the right coupling.
-    //
-
-    #[test]
-    fn add_internal_unknown_to_non_browser_falls_through_to_keep() {
-        // Internal::add is browser-only by intent. Other panels'
-        // on_internal impls don't match it, so it lands in
-        // on_internal_generic, whose `_` arm returns CmdResult::Keep.
-        // This test pins that wildcard remains the contract for unknown
-        // internals — a regression that flipped that wildcard would
-        // accidentally let `add` (and others) silently change behaviour
-        // across panel types.
-        //
-        // We use `matches!` to assert the variant without constructing
-        // a full Panel + dispatch path.
-        let keep = CmdResult::Keep;
-        assert!(matches!(keep, CmdResult::Keep));
-    }
 }

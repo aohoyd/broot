@@ -825,12 +825,18 @@ mod bulk_rename_routing_tests {
         crokey::key,
     };
 
-    /// `find_key_verb` returns verbs in registration order. Both the
-    /// `bulk_rename` internal and the external `rename` verb bind F2;
-    /// the internal must be registered first so it wins the lookup.
-    /// This test asserts that ordering invariant — if someone reorders
-    /// the registrations and the external `rename` ends up first, F2
-    /// would silently switch to the inline-only flow.
+    /// `find_key_verb` returns verbs in registration order, but with
+    /// additional per-verb filters: `can_be_called_in_panel`,
+    /// `selection_condition`, and `file_extensions`. This test pins
+    /// BOTH the registration order AND the filter shape so a future
+    /// change to either path keeps F2 routed to `Internal::bulk_rename`.
+    ///
+    /// Specifically, we assert that the first F2-bound verb has:
+    ///   - registration order before the external `rename`
+    ///   - no `file_extensions` restriction (would skip dot-less files)
+    ///   - `selection_condition` of `Any` (would otherwise skip the
+    ///     no-selection case where the user opens F2 with the stage
+    ///     populated but no tree selection)
     #[test]
     fn f2_resolves_to_internal_bulk_rename_before_external_rename() {
         let mut conf = Conf::default();
@@ -846,6 +852,16 @@ mod bulk_rename_routing_tests {
             Some(Internal::bulk_rename),
             "F2 must resolve to Internal::bulk_rename first; \
              check the registration order in add_builtin_verbs",
+        );
+        assert!(
+            first_f2_verb.file_extensions.is_empty(),
+            "Internal::bulk_rename must not restrict by file extension; \
+             a filter would let find_key_verb skip past it to the external rename",
+        );
+        assert!(
+            matches!(first_f2_verb.selection_condition, FileTypeCondition::Any),
+            "Internal::bulk_rename must accept any selection; \
+             a stricter condition would let find_key_verb skip past it",
         );
     }
 

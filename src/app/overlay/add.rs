@@ -15,10 +15,6 @@
 //! │  [ Cancel ]                     [ Create ]   │
 //! ╰──────────────────────────────────────────────╯
 //! ```
-//!
-//! Task 2 landed the struct, the render path, and the enum wiring.
-//! Task 3 (this file) wires real input handling and the filesystem
-//! commit.
 
 use {
     super::{
@@ -132,8 +128,13 @@ impl AddOverlay {
         if self.input.is_empty() {
             return Some("name cannot be empty".to_string());
         }
-        if self.input.starts_with('/') {
-            return Some("name cannot start with /".to_string());
+        // Reject any absolute path. `is_absolute()` is platform-aware:
+        // on POSIX it catches leading `/`; on Windows it also catches
+        // drive-letter forms like `C:\foo` and UNC paths `\\server\share`,
+        // which `target_dir.join(...)` would otherwise resolve to the
+        // absolute path, escaping `target_dir`.
+        if Path::new(&self.input).is_absolute() {
+            return Some("name cannot be an absolute path".to_string());
         }
         if Path::new(&self.input)
             .components()
@@ -196,18 +197,14 @@ impl AddOverlay {
     /// Find the byte index of the char immediately after the cursor.
     /// Returns `None` if the cursor is already at the string end.
     fn next_char_boundary(&self) -> Option<usize> {
+        debug_assert!(
+            self.input.is_char_boundary(self.cursor),
+            "cursor must always sit on a char boundary",
+        );
         self.input
             .char_indices()
             .find(|(i, _)| *i >= self.cursor)
-            .map(|(i, c)| {
-                if i == self.cursor {
-                    i + c.len_utf8()
-                } else {
-                    // Cursor was mid-char (shouldn't happen given we
-                    // only ever set it to a boundary); snap forward.
-                    i
-                }
-            })
+            .map(|(i, c)| i + c.len_utf8())
     }
 }
 
@@ -341,12 +338,10 @@ impl OverlayState for AddOverlay {
         &mut self,
         key: KeyCombination,
     ) -> OverlayOutcome {
-        // ---- Cancel-class keys -----------------------------------------
         if key == key!(esc) || key == key!(ctrl - c) {
             return OverlayOutcome::Close;
         }
 
-        // ---- Enter: validate + commit ----------------------------------
         // Enter always tries to commit, regardless of focus. The buttons
         // exist for mouse users; keyboard users live in the input field
         // and Enter is the natural "submit" key. Cancel via Esc/Ctrl-C
@@ -355,7 +350,6 @@ impl OverlayState for AddOverlay {
             return self.try_commit();
         }
 
-        // ---- Tab: toggle focus -----------------------------------------
         // Note: arrow keys are *not* focus-toggles here (unlike
         // confirm.rs) because they must move the text cursor.
         if key == key!(tab) {
@@ -366,7 +360,6 @@ impl OverlayState for AddOverlay {
             return OverlayOutcome::Stay;
         }
 
-        // ---- Cursor movement -------------------------------------------
         if key == key!(left) {
             if let Some(prev) = self.prev_char_boundary() {
                 self.cursor = prev;
@@ -388,7 +381,6 @@ impl OverlayState for AddOverlay {
             return OverlayOutcome::Stay;
         }
 
-        // ---- Backspace: delete char before cursor ----------------------
         if key == key!(backspace) {
             if let Some(prev) = self.prev_char_boundary() {
                 self.input.remove(prev);
@@ -397,7 +389,6 @@ impl OverlayState for AddOverlay {
             return OverlayOutcome::Stay;
         }
 
-        // ---- Printable char insertion ----------------------------------
         if let Some(c) = key_to_printable_char(&key) {
             // Defensive: only insert at a valid char boundary. `cursor`
             // is maintained at a boundary by every path above, so this
@@ -471,15 +462,6 @@ mod tests {
         o.render(&mut wbuf, screen, &palette).unwrap();
         let bytes = wbuf.buffer().to_vec();
         String::from_utf8_lossy(&bytes).into_owned()
-    }
-
-    fn render_into(o: &AddOverlay) {
-        // Drive the render path purely for its `button_hits` side
-        // effect — the bytes are dropped.
-        let palette = StyleMap::no_term();
-        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
-        let screen = Area::new(0, 0, 80, 24);
-        o.render(&mut wbuf, screen, &palette).unwrap();
     }
 
     fn mouse_at(x: u16, y: u16) -> MouseEvent {
@@ -754,6 +736,54 @@ mod tests {
         assert_eq!(o.cursor, 3);
     }
 
+    #[test]
+    fn cursor_movement_with_multi_byte_chars() {
+        // `é` is 2 UTF-8 bytes (0xC3 0xA9); `中` is 3 bytes. The cursor
+        // is a byte index — `prev_char_boundary` / `next_char_boundary`
+        // must hop over the entire codepoint, not break a char in half
+        // (which would later panic in `input.remove(prev)`).
+        let mut o = make();
+        for c in "é中a".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        // After insertion: input = "é中a" (2 + 3 + 1 = 6 bytes), cursor at 6.
+        assert_eq!(o.input, "é中a");
+        assert_eq!(o.cursor, 6);
+
+        // Left moves to start of `a` (byte 5).
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.cursor, 5);
+        // Left again moves to start of `中` (byte 2).
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.cursor, 2);
+        // Left again moves to start of `é` (byte 0).
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.cursor, 0);
+
+        // Right moves past `é` (byte 2).
+        let _ = o.handle_key(key!(right));
+        assert_eq!(o.cursor, 2);
+        // Right moves past `中` (byte 5).
+        let _ = o.handle_key(key!(right));
+        assert_eq!(o.cursor, 5);
+    }
+
+    #[test]
+    fn backspace_with_multi_byte_chars_removes_full_codepoint() {
+        // Regression pin: backspacing must remove the whole codepoint
+        // (2 bytes for `é`), not just a trailing byte — `input.remove`
+        // panics if asked to slice mid-codepoint.
+        let mut o = make();
+        for c in "aé".chars() {
+            let _ = o.handle_key(KeyCombination::from(KeyCode::Char(c)));
+        }
+        assert_eq!(o.input, "aé");
+        assert_eq!(o.cursor, 3);
+        let _ = o.handle_key(key!(backspace));
+        assert_eq!(o.input, "a");
+        assert_eq!(o.cursor, 1);
+    }
+
     // ---- key dispatch: control -----------------------------------------
 
     #[test]
@@ -830,7 +860,24 @@ mod tests {
         o.cursor = o.input.len();
         let r = o.handle_key(key!(enter));
         assert!(matches!(r, OverlayOutcome::Stay));
-        assert_eq!(o.error.as_deref(), Some("name cannot start with /"));
+        assert_eq!(
+            o.error.as_deref(),
+            Some("name cannot be an absolute path"),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_absolute_rejected() {
+        let mut o = make();
+        o.input = "C:\\Windows\\foo".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(
+            o.error.as_deref(),
+            Some("name cannot be an absolute path"),
+        );
     }
 
     #[test]
@@ -860,7 +907,7 @@ mod tests {
     #[test]
     fn mouse_on_cancel_closes() {
         let mut o = make();
-        render_into(&o);
+        let _ = render_to_string(&o);
         let hits = o.button_hits.get_cloned().unwrap();
         let cx = hits.cancel.left + hits.cancel.width / 2;
         let cy = hits.cancel.top;
@@ -871,7 +918,7 @@ mod tests {
     #[test]
     fn mouse_on_create_with_empty_input_stays_and_sets_error() {
         let mut o = make();
-        render_into(&o);
+        let _ = render_to_string(&o);
         let hits = o.button_hits.get_cloned().unwrap();
         let cx = hits.confirm.left + hits.confirm.width / 2;
         let cy = hits.confirm.top;
@@ -883,7 +930,7 @@ mod tests {
     #[test]
     fn mouse_off_buttons_stays() {
         let mut o = make();
-        render_into(&o);
+        let _ = render_to_string(&o);
         let r = o.handle_mouse(mouse_at(0, 0));
         assert!(matches!(r, OverlayOutcome::Stay));
     }
@@ -891,7 +938,7 @@ mod tests {
     #[test]
     fn mouse_non_left_click_stays() {
         let mut o = make();
-        render_into(&o);
+        let _ = render_to_string(&o);
         let hits = o.button_hits.get_cloned().unwrap();
         let cx = hits.cancel.left + hits.cancel.width / 2;
         let cy = hits.cancel.top;
@@ -962,6 +1009,28 @@ mod tests {
         assert!(expected.exists());
         assert!(expected.is_file());
         assert!(tmp.path().join("nested/deeper").is_dir());
+    }
+
+    #[test]
+    fn commit_existing_file_is_overwritten() {
+        // Pin: current behaviour is `fs::File::create` (truncates an
+        // existing file). If we ever want a "refuse to overwrite" policy
+        // it must be an explicit change with a corresponding update to
+        // this test — silent overwrites in a `:add` modal are a footgun.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("existing.txt");
+        std::fs::write(&path, b"original contents that should be wiped").unwrap();
+        let mut o = AddOverlay::new(tmp.path().to_path_buf());
+        o.input = "existing.txt".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        match r {
+            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, path),
+            other => panic!("expected CloseAndFocus, got {other:?}"),
+        }
+        // The file exists but its content was truncated by `File::create`.
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.is_empty(), "existing file must be truncated, got {after:?}");
     }
 
     #[test]

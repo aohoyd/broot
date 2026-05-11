@@ -7,11 +7,13 @@
 //!   shown to the user in `$EDITOR`. One `path.display()` per line,
 //!   `\n` terminator after every entry (including the last).
 //! - [`parse`] — turn the edited text back into a `Vec<String>` of
-//!   one entry per non-blank, non-comment line. Trailing whitespace is
-//!   trimmed; leading whitespace is preserved (only the comment check
-//!   inspects the first non-whitespace char).
+//!   one entry per non-blank, non-comment line. Trailing `\r` is
+//!   stripped (so CRLF-terminated lines round-trip cleanly); any other
+//!   whitespace — leading or trailing — is preserved, because a
+//!   filename may legitimately start or end with a space. Lines whose
+//!   first non-whitespace char is `#` are dropped as comments.
 //! - [`plan`] — validate the parsed lines against the original stage
-//!   and return a [`RenameRun`] ready for the apply phase (Task 7).
+//!   and return a [`RenameRun`] ready for [`apply`].
 //!
 //! The `existing` predicate is injected into [`plan`] (`&dyn Fn(&Path)
 //! -> bool`) so unit tests can fake the filesystem-existence check;
@@ -19,9 +21,9 @@
 //!
 //! Validation rules are ordered and short-circuit — the first failure
 //! wins. Cycles (`a → b, b → a`) are NOT a validation failure: they
-//! reach the apply phase intact and Task 7's two-phase rename resolves
-//! them. Unchanged pairs (target equals source) are filtered out before
-//! returning so the diff modal only shows real changes.
+//! reach the apply phase intact and [`apply`]'s two-phase rename
+//! resolves them. Unchanged pairs (target equals source) are filtered
+//! out before returning so the diff modal only shows real changes.
 
 use {
     std::{
@@ -48,15 +50,16 @@ pub fn serialize(stage: &[PathBuf]) -> String {
 
 /// Parse the user-edited text back into one entry per line.
 ///
-/// - Splits on `\n` (using [`str::lines`], which also tolerates `\r\n`).
-/// - Trims trailing whitespace from each line (leading whitespace is
-///   preserved — a filename may begin with a space).
+/// - Splits on `\n` (using [`str::lines`], which already strips trailing
+///   `\r` so CRLF input round-trips cleanly).
+/// - Whitespace inside each line is preserved verbatim — a filename may
+///   legitimately begin or end with a space, and `trim_end` would
+///   silently corrupt those paths into different ones.
 /// - Skips fully blank lines and lines whose first non-whitespace
 ///   character is `#` (comments).
 pub fn parse(edited: &str) -> Vec<String> {
     edited
         .lines()
-        .map(|l| l.trim_end())
         .filter(|l| !l.is_empty() && !l.trim_start().starts_with('#'))
         .map(|l| l.to_string())
         .collect()
@@ -64,11 +67,15 @@ pub fn parse(edited: &str) -> Vec<String> {
 
 /// The validated set of renames to apply.
 ///
-/// Built by [`plan`]; consumed by `apply` in Task 7. Pairs where the
+/// Built by [`plan`]; consumed by [`apply`]. Pairs where the
 /// target equals the source have already been filtered out, so every
 /// entry is a real rename.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenameRun {
+    /// Ordered `(from, to)` pairs. `from` is the path that exists on
+    /// disk before the rename; `to` is the destination. The vector is
+    /// the iteration order [`apply`] walks: phase 1 attempts each
+    /// rename in turn, deferring cycle members through a temp file.
     pub renames: Vec<(PathBuf, PathBuf)>,
 }
 
@@ -191,7 +198,7 @@ pub fn plan(
     // Rule 4: no external collision. A target that exists on disk is
     // only rejected if it isn't also one of the source paths (which
     // would be a cycle and is accepted).
-    let source_set: std::collections::HashSet<&PathBuf> = stage.iter().collect();
+    let source_set: HashSet<&PathBuf> = stage.iter().collect();
     for (_, to) in &pairs {
         if existing(to) && !source_set.contains(to) {
             return Err(BulkRenameError::ExternalCollision {
@@ -259,6 +266,16 @@ pub fn apply(run: &RenameRun) -> Result<(), (PathBuf, io::Error)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serialize_empty_stage_yields_empty_string() {
+        // An empty stage round-trips through serialize/parse as the
+        // empty payload. Pinning this protects the edge case where the
+        // caller decides whether to invoke the editor at all.
+        assert_eq!(serialize(&[]), "");
+        let parsed = parse("");
+        assert!(parsed.is_empty(), "parsing empty string must yield no entries");
+    }
 
     #[test]
     fn serialize_parse_round_trip() {
@@ -368,21 +385,33 @@ mod tests {
     }
 
     #[test]
-    fn plan_cycle_produces_two_entries() {
-        // Same shape as the cycle test above but reads more like a
-        // standalone "two entries are returned" assertion — kept
-        // separate because the plan checkbox lists it explicitly.
-        let stage = vec![
-            PathBuf::from("/tmp/a"),
-            PathBuf::from("/tmp/b"),
-        ];
-        let edited = vec!["b".to_string(), "a".to_string()];
-        let existing = |p: &Path| {
-            p == Path::new("/tmp/a") || p == Path::new("/tmp/b")
-        };
-        let run = plan(&stage, &edited, &existing)
-            .expect("cycle must produce a RenameRun");
-        assert_eq!(run.renames.len(), 2);
+    fn plan_absolute_target_used_as_is() {
+        // Pin: when the edited line is an absolute path, `plan` uses it
+        // verbatim rather than joining it to the source's parent. Tests
+        // the `Path::new(edited).is_absolute()` branch in the resolver.
+        let stage = vec![PathBuf::from("/tmp/src/a")];
+        let edited = vec!["/elsewhere/b".to_string()];
+        let run = plan(&stage, &edited, &|_| false).expect("plan must validate");
+        assert_eq!(
+            run.renames,
+            vec![(
+                PathBuf::from("/tmp/src/a"),
+                PathBuf::from("/elsewhere/b"),
+            )],
+        );
+    }
+
+    #[test]
+    fn plan_relative_target_joins_source_parent() {
+        // Sibling assertion to the absolute case: a bare filename
+        // lands alongside the source.
+        let stage = vec![PathBuf::from("/tmp/src/a")];
+        let edited = vec!["b".to_string()];
+        let run = plan(&stage, &edited, &|_| false).expect("plan must validate");
+        assert_eq!(
+            run.renames,
+            vec![(PathBuf::from("/tmp/src/a"), PathBuf::from("/tmp/src/b"))],
+        );
     }
 
     #[test]
@@ -405,9 +434,23 @@ mod tests {
 
     #[test]
     fn parse_skips_comments_and_blanks() {
+        // Leading and trailing whitespace are now preserved verbatim —
+        // filenames with surrounding spaces (rare but legal on POSIX)
+        // must round-trip through serialize/parse without corruption.
         let input = "a\n#comment\n\n  b  \n\t# indented comment\n";
         let parsed = parse(input);
-        assert_eq!(parsed, vec!["a".to_string(), "  b".to_string()]);
+        assert_eq!(parsed, vec!["a".to_string(), "  b  ".to_string()]);
+    }
+
+    #[test]
+    fn parse_preserves_trailing_space_in_filename() {
+        // Regression pin: a previous version of `parse` stripped
+        // trailing whitespace, which corrupted unusual but valid POSIX
+        // filenames like `/tmp/foo ` (note the trailing space) into a
+        // sibling path `/tmp/foo`.
+        let input = "/tmp/foo \n/tmp/bar\n";
+        let parsed = parse(input);
+        assert_eq!(parsed, vec!["/tmp/foo ".to_string(), "/tmp/bar".to_string()]);
     }
 
     #[test]
@@ -502,6 +545,81 @@ mod apply_tests {
         // After swap: file at path `a` has content "B", path `b` has "A".
         assert_eq!(stdfs::read(&a).unwrap(), b"B");
         assert_eq!(stdfs::read(&b).unwrap(), b"A");
+
+        // No `.broot-bulk-tmp-*` leftover anywhere in the dir — phase 2
+        // must consume every temp the phase 1 cycle branch creates.
+        let leftovers: Vec<_> = stdfs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(".broot-bulk-tmp-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .broot-bulk-tmp-* files should remain on success: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>(),
+        );
+    }
+
+    /// Phase-2 failure: construct a run where the temp file queued for
+    /// phase 2 is moved out from under us by a later phase-1 rename
+    /// (the temp's parent directory is itself renamed away). The
+    /// phase-2 `fs::rename(tmp, to)` then fails with NotFound, the
+    /// error tuple names the (now-stale) tmp path, and the temp file
+    /// is intentionally NOT cleaned up — it lives on disk under its
+    /// new post-parent-rename location, matching the documented "no
+    /// rollback" contract.
+    #[test]
+    fn apply_phase_2_failure_returns_tmp_path_in_error_tuple() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        // Set up:
+        //   dir/a/x  (file inside subdir)
+        //   dir/b    (file)
+        //   dir/a    (directory containing x — also a rename source)
+        let a_dir = dir.join("a");
+        stdfs::create_dir(&a_dir).unwrap();
+        let a_x = a_dir.join("x");
+        stdfs::write(&a_x, b"X").unwrap();
+        let b = dir.join("b");
+        stdfs::write(&b, b"B").unwrap();
+        let c = dir.join("c"); // destination for a (doesn't exist yet)
+
+        // Renames:
+        //   1. a/x -> b   (cycle: b exists & b is a source)
+        //   2. b   -> a/x (continuation of the 2-cycle)
+        //   3. a   -> c   (moves a/x.broot-bulk-tmp-0 with it,
+        //                  breaking phase-2's reference to it)
+        let run = RenameRun {
+            renames: vec![
+                (a_x.clone(), b.clone()),
+                (b.clone(), a_x.clone()),
+                (a_dir.clone(), c.clone()),
+            ],
+        };
+        let err = apply(&run).expect_err("phase 2 must fail");
+        let (failed_path, io_err) = err;
+        // The tmp path that phase 2 tried to read no longer exists at
+        // the original location — `apply` reports that path verbatim.
+        let expected_stale_tmp = a_dir.join("x.broot-bulk-tmp-0");
+        assert_eq!(failed_path, expected_stale_tmp);
+        assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+
+        // Documented "no rollback" semantics:
+        //   - The parent rename (iter 2) stayed applied: `c` is now a
+        //     directory containing the orphaned temp under its new path.
+        //   - `b` is gone (renamed in iter 1).
+        //   - The original `a` location is empty.
+        assert!(c.is_dir(), "iter 2 rename (a -> c) must have applied");
+        assert!(
+            c.join("x.broot-bulk-tmp-0").exists(),
+            "phase-1 temp must be on disk under its post-parent-rename path",
+        );
+        assert!(!b.exists(), "iter 1 rename (b -> a/x) ran; b is gone");
+        assert!(!a_dir.exists(), "iter 2 rename moved a away; original is gone");
     }
 
     /// Three files; middle target points into a non-existent directory

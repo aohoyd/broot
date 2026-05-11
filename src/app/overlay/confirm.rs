@@ -1,9 +1,9 @@
 //! Yes/no confirmation overlay.
 //!
 //! `ConfirmOverlay` is a generic, reusable modal that asks the user to
-//! confirm or cancel a pending [`Command`]. It is the foundation for the
-//! destructive-verb prompts wired in by Tasks 8-10 (rm/trash, mv/cp
-//! overwrite, bulk staging).
+//! confirm or cancel a pending [`Command`]. It is the foundation for
+//! destructive-verb prompts (rm/trash), mv/cp overwrite, and bulk
+//! staging confirmation.
 //!
 //! Layout (centred on the screen):
 //!
