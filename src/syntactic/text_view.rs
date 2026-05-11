@@ -618,48 +618,19 @@ impl TextView {
         Ok(())
     }
 
-    fn info(
-        &self,
-        width: usize,
-    ) -> String {
-        if self.is_partial() {
-            let s = "loading...";
-            let s  = if s.len() > width {
-                ""
-            } else {
-                s
-            };
-            return s.to_string();
-        }
-        let mut s = if self.pattern.is_some() {
-            format!("{}/{}", self.content_lines_count, self.total_lines_count)
+    /// Returns the line count info formatted for use in the preview pane's
+    /// frame title.
+    /// - unfiltered: `"{total} lines"`
+    /// - filtered:   `"{filtered}/{total}"`
+    pub fn info_string(&self) -> Option<String> {
+        if self.pattern.is_some() {
+            Some(format!(
+                "{}/{}",
+                self.content_lines_count, self.total_lines_count
+            ))
         } else {
-            format!("{}", self.total_lines_count)
-        };
-        if s.len() > width {
-            return "".to_string();
+            Some(format!("{} lines", self.total_lines_count))
         }
-        if s.len() + "lines: ".len() < width {
-            s = format!("lines: {s}");
-        }
-        s
-    }
-
-    pub fn display_info(
-        &mut self,
-        w: &mut W,
-        _screen: Screen,
-        panel_skin: &PanelSkin,
-        area: &Area,
-    ) -> Result<(), ProgramError> {
-        let width = area.width as usize;
-        let s = self.info(width);
-        w.queue(cursor::MoveTo(
-            area.left + area.width - s.len() as u16,
-            area.top,
-        ))?;
-        panel_skin.styles.default.queue(w, s)?;
-        Ok(())
     }
 }
 
@@ -696,4 +667,55 @@ fn printable_line(line: &str) -> Cow<'_, str> {
 
 fn is_char_end_of_line(c: char) -> bool {
     c == '\n' || c == '\r'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `TextView` for unit tests. Real construction requires
+    /// file I/O via `TextView::new`; here we only exercise field-driven
+    /// accessors (`info_string`).
+    fn fake_text_view(
+        content_lines_count: usize,
+        total_lines_count: usize,
+        filtered: bool,
+    ) -> TextView {
+        TextView {
+            path: PathBuf::from("/dev/null"),
+            pattern: if filtered {
+                // any non-empty pattern triggers `pattern.is_some()`; we
+                // synthesize one via the same parser used at runtime.
+                let cp = crate::command::CommandParts::from("hello");
+                let search_modes = crate::pattern::SearchModeMap::default();
+                let pattern =
+                    crate::pattern::Pattern::new(&cp.pattern, &search_modes, 0).unwrap();
+                InputPattern {
+                    raw: "hello".to_string(),
+                    pattern,
+                }
+            } else {
+                InputPattern::none()
+            },
+            lines: Vec::new(),
+            scroll: 0,
+            page_height: 0,
+            selection_idx: None,
+            content_lines_count,
+            total_lines_count,
+            partial: false,
+        }
+    }
+
+    #[test]
+    fn info_string_unfiltered() {
+        let tv = fake_text_view(0, 42, false);
+        assert_eq!(tv.info_string(), Some("42 lines".to_string()));
+    }
+
+    #[test]
+    fn info_string_filtered() {
+        let tv = fake_text_view(3, 42, true);
+        assert_eq!(tv.info_string(), Some("3/42".to_string()));
+    }
 }

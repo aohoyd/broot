@@ -3,7 +3,6 @@ use {
         BRANCH_FILLING,
         Col,
         CropWriter,
-        GitStatusDisplay,
         MatchedString,
         SPACE_FILLING,
         num_format::format_count,
@@ -18,7 +17,6 @@ use {
             ExtColorMap,
             StyleMap,
         },
-        task_sync::ComputationResult,
         tree::{
             Tree,
             TreeLine,
@@ -41,10 +39,6 @@ use {
     termimad::{
         CompoundStyle,
         ProgressBar,
-    },
-    unicode_width::{
-        UnicodeWidthChar,
-        UnicodeWidthStr,
     },
 };
 
@@ -320,7 +314,6 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
         if let Some(icon) = line.icon {
             cw.queue_char(style, icon)?;
             cw.queue_char(style, ' ')?;
-            cw.queue_char(style, ' ')?;
         }
         if pattern_object.subpath {
             if self.tree.options.show_matching_characters_on_path_searches && line.unlisted == 0 {
@@ -406,57 +399,6 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
         Ok(())
     }
 
-    pub fn write_root_line<W: Write>(
-        &self,
-        cw: &mut CropWriter<W>,
-        selected: bool,
-    ) -> Result<(), ProgramError> {
-        cond_bg!(style, self, selected, self.skin.directory);
-        let line = &self.tree.lines[0];
-        if self.tree.options.show_sizes {
-            if let Some(s) = line.sum {
-                cw.queue_g_string(style, format!("{:>4} ", file_size::fit_4(s.to_size())))?;
-            }
-        }
-        let title = line.path.to_string_lossy();
-        let title_len = UnicodeWidthStr::width(title.as_ref());
-        if title_len > cw.allowed {
-            cw.queue_char(style, '…')?;
-            // we take the last chars making up to allowed - 1 columns
-            // we'll assume there's no backspace
-            let mut width = 0;
-            let mut bytes = 0;
-            for c in title.chars().rev() {
-                let char_width = c.width().unwrap_or(0);
-                if width + char_width > cw.allowed - 1 {
-                    break;
-                }
-                width += char_width;
-                bytes += c.len_utf8();
-            }
-            let right_cropped_title = &title[title.len() - bytes..];
-            cw.queue_str(style, right_cropped_title)?;
-        } else {
-            cw.queue_str(style, &title)?;
-        }
-
-        if self.in_app && !cw.is_full() {
-            if let ComputationResult::Done(git_status) = &self.tree.git_status {
-                let git_status_display = GitStatusDisplay::from(git_status, self.skin, cw.allowed);
-                git_status_display.write(cw, selected)?;
-            }
-            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-            if self.tree.options.show_root_fs {
-                if let Some(mount) = line.mount() {
-                    let fs_space_display =
-                        crate::filesystems::MountSpaceDisplay::from(&mount, self.skin, cw.allowed);
-                    fs_space_display.write(cw, selected)?;
-                }
-            }
-            self.extend_line_bg(cw, selected)?;
-        }
-        Ok(())
-    }
 
     /// if in app, extend the background till the end of screen row
     pub fn extend_line_bg<W: Write>(
@@ -486,22 +428,22 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
         let tree = self.tree;
         let total_size = tree.total_sum();
         let scrollbar = if self.in_app {
+            // The root row (`tree.lines[0]`) is no longer painted into the
+            // body — it's surfaced via the frame title, and the aux info
+            // it used to carry lives at the right end of the status row.
+            // The body renders `tree.lines[1..]` starting at `area.top`,
+            // so the scrollbar spans the full area height and the
+            // content row count is `tree.lines.len() - 1`.
             termimad::compute_scrollbar(
                 tree.scroll,
-                tree.lines.len() - 1, // the root line isn't scrolled
-                self.area.height - 1, // the scrollbar doesn't cover the first line
-                self.area.top + 1,
+                tree.lines.len() - 1, // root excluded from scroll
+                self.area.height,
+                self.area.top,
             )
         } else {
             None
         };
-        if self.in_app {
-            f.queue(cursor::MoveTo(self.area.left, self.area.top))?;
-        }
-        let mut cw = CropWriter::new(f, self.area.width as usize);
         let pattern_object = tree.options.pattern.pattern.object();
-        self.write_root_line(&mut cw, self.in_app && tree.selection == 0)?;
-        self.skin.queue_reset(f)?;
 
         let visible_cols: Vec<Col> = tree
             .options
@@ -535,16 +477,16 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             0 // we don't care
         };
 
-        for y in 1..self.area.height {
+        for y in 0..self.area.height {
             if self.in_app {
                 f.queue(cursor::MoveTo(self.area.left, y + self.area.top))?;
             } else {
                 write!(f, "\r\n")?;
             }
-            let mut line_index = y as usize;
-            if line_index > 0 {
-                line_index += tree.scroll;
-            }
+            // Body rows render `tree.lines[1..]` starting at body row 0:
+            // body row 0 -> lines[1 + scroll], body row 1 -> lines[2 + scroll], ...
+            // (root line is now painted in the frame title, not the body)
+            let line_index = (y as usize) + 1 + tree.scroll;
             let mut selected = false;
             let mut cw = CropWriter::new(f, self.area.width as usize);
             let cw = &mut cw;
@@ -652,8 +594,18 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             self.skin.queue_reset(f)?;
             if self.in_app {
                 if let Some((sctop, scbottom)) = scrollbar {
-                    f.queue(cursor::MoveTo(self.area.left + self.area.width - 1, y))?;
-                    let style = if sctop <= y && y <= scbottom {
+                    // `y` is the body-row index (0-based); the scrollbar is
+                    // painted at the absolute row `y + self.area.top`. The
+                    // `sctop`/`scbottom` returned by `compute_scrollbar` are
+                    // absolute rows too (the helper was called with
+                    // `top = self.area.top`), so the thumb predicate must
+                    // compare against the absolute row.
+                    let abs_y = y + self.area.top;
+                    f.queue(cursor::MoveTo(
+                        self.area.left + self.area.width - 1,
+                        abs_y,
+                    ))?;
+                    let style = if sctop <= abs_y && abs_y <= scbottom {
                         &self.skin.scrollbar_thumb
                     } else {
                         &self.skin.scrollbar_track

@@ -229,28 +229,6 @@ impl TtyView {
         Ok(())
     }
 
-    pub fn display_info(
-        &mut self,
-        w: &mut W,
-        _screen: Screen,
-        panel_skin: &PanelSkin,
-        area: &Area,
-    ) -> Result<(), ProgramError> {
-        let width = area.width as usize;
-        let mut s = format!("{}", self.total_lines_count);
-        if s.len() > width {
-            return Ok(());
-        }
-        if s.len() + "lines: ".len() < width {
-            s = format!("lines: {s}");
-        }
-        w.queue(cursor::MoveTo(
-            area.left + area.width - s.len() as u16,
-            area.top,
-        ))?;
-        panel_skin.styles.default.queue(w, s)?;
-        Ok(())
-    }
 }
 
 fn is_thumb(

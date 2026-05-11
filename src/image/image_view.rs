@@ -6,16 +6,12 @@ use {
     },
     crate::{
         app::*,
-        display::{
-            Screen,
-            W,
-        },
+        display::W,
         errors::ProgramError,
         kitty::{
             self,
             KittyImageId,
         },
-        skin::PanelSkin,
     },
     crokey::crossterm::{
         QueueableCommand,
@@ -191,23 +187,10 @@ impl ImageView {
         }
         Ok(())
     }
-    pub fn display_info(
-        &mut self,
-        w: &mut W,
-        _screen: Screen,
-        panel_skin: &PanelSkin,
-        area: &Area,
-    ) -> Result<(), ProgramError> {
-        let dim = self.source_img.dimensions();
-        let s = format!("{} x {}", dim.0, dim.1);
-        if s.len() > area.width as usize {
-            return Ok(());
-        }
-        w.queue(cursor::MoveTo(
-            area.left + area.width - s.len() as u16,
-            area.top,
-        ))?;
-        panel_skin.styles.default.queue(w, s)?;
-        Ok(())
+    /// Returns `"{w}x{h}"` (lowercase x, no spaces) for use in the preview
+    /// pane's frame title.
+    pub fn info_string(&self) -> Option<String> {
+        let (w, h) = self.source_img.dimensions();
+        Some(format!("{w}x{h}"))
     }
 }

@@ -27,12 +27,12 @@ mod col;
 mod displayable_tree;
 pub mod flags_display;
 pub mod frame;
-mod git_status_display;
 mod layout_instructions;
 mod luma;
 mod matched_string;
 mod num_format;
 mod screen;
+pub mod status_aux;
 pub mod status_line;
 
 #[cfg(not(any(target_family = "windows", target_os = "android")))]
@@ -44,11 +44,11 @@ pub use {
     col::*,
     cond_bg,
     displayable_tree::DisplayableTree,
-    git_status_display::GitStatusDisplay,
     layout_instructions::*,
     luma::LumaCondition,
     matched_string::MatchedString,
     screen::Screen,
+    status_aux::StatusAux,
 };
 use {
     once_cell::sync::Lazy,

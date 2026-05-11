@@ -236,28 +236,41 @@ impl Tree {
                 break;
             }
         }
-        // we adjust the scroll
+        // we adjust the scroll.
+        //
+        // Geometry note: the body renders `lines[1..]` (root excluded), so
+        // valid visible indices are `scroll + 1 ..= scroll + page_height`
+        // and the max valid scroll is `lines.len() - 1 - page_height`.
+        // `saturating_sub` guards the "everything fits" path (l == 0 already
+        // returned above; if l <= page_height + 1 the body fits with scroll
+        // at 0).
         if l > page_height {
+            let max_scroll = l.saturating_sub(1).saturating_sub(page_height);
             if self.selection < 3 {
                 self.scroll = 0;
             } else if self.selection < self.scroll + 3 {
                 self.scroll = self.selection - 3;
             } else if self.selection + 3 > l {
-                self.scroll = l - page_height;
+                self.scroll = max_scroll;
             } else if self.selection + 3 > self.scroll + page_height {
-                self.scroll = self.selection + 3 - page_height;
+                self.scroll = (self.selection + 3 - page_height).min(max_scroll);
             }
         }
     }
 
     /// Scroll the desired amount and return true, or return false if it's
-    /// already at end or the tree fits the page
+    /// already at end or the tree fits the page.
+    ///
+    /// The body renders `lines[1..]` (root is in the frame title), so the
+    /// scrollable content length is `lines.len() - 1` and the max valid
+    /// scroll is `lines.len() - 1 - page_height`.
     pub fn try_scroll(
         &mut self,
         dy: i32,
         page_height: usize,
     ) -> bool {
-        if self.lines.len() <= page_height {
+        // root is excluded from scrollable rows
+        if self.lines.len().saturating_sub(1) <= page_height {
             return false;
         }
         if dy < 0 {
@@ -273,7 +286,7 @@ impl Tree {
             }
         } else {
             // scroll down
-            let max = self.lines.len() - page_height;
+            let max = self.lines.len() - 1 - page_height;
             if self.scroll >= max {
                 return false;
             }
@@ -284,14 +297,21 @@ impl Tree {
     }
 
     /// try to select a line by index of visible line
-    /// (works if y+scroll falls on a selectable line)
+    /// (works if the resolved line is selectable)
+    ///
+    /// Body row 0 corresponds to `lines[1]` because the root row
+    /// (`lines[0]`) is no longer painted into the tree body — it lives
+    /// in the frame title. Clicking the body therefore cannot select
+    /// the root: callers wishing to navigate up should use `:back`,
+    /// `Esc`, or the goto modal.
     pub fn try_select_y(
         &mut self,
         y: usize,
     ) -> bool {
-        let y = y + self.scroll;
-        if y < self.lines.len() && self.lines[y].is_selectable() {
-            self.selection = y;
+        // body row y -> tree.lines[y + 1 + scroll]
+        let idx = y + 1 + self.scroll;
+        if idx < self.lines.len() && self.lines[idx].is_selectable() {
+            self.selection = idx;
             return true;
         }
         false
@@ -301,7 +321,11 @@ impl Tree {
         &mut self,
         page_height: usize,
     ) {
-        if self.selection < self.scroll || self.selection >= self.scroll + page_height {
+        // Body renders `lines[1..]` (root excluded). Visible body lines map
+        // to `lines[scroll + 1 ..= scroll + page_height]`, so the last
+        // visible index is `scroll + page_height` (inclusive). Selection
+        // strictly greater than that is below the viewport.
+        if self.selection < self.scroll || self.selection > self.scroll + page_height {
             self.selection = self.scroll;
             let l = self.lines.len();
             loop {
@@ -317,14 +341,26 @@ impl Tree {
         &mut self,
         page_height: usize,
     ) {
-        if page_height >= self.lines.len() || self.selection < 3 {
+        // Effective scrollable content excludes the root (lines[0]), so
+        // the "everything fits" check uses `lines.len() - 1` and the
+        // max scroll is also `lines.len() - 1 - page_height`.
+        //
+        // Visible range of `selection` for a given `scroll` is
+        // `[scroll + 1, scroll + page_height]` (inclusive), so the
+        // scroll-forward branch must fire on `selection > scroll + page_height`
+        // (strictly), not `>=`. Otherwise a selection sitting exactly on
+        // the last visible row would trigger a needless scroll, and (for
+        // selections near the end of the tree) push `scroll` one row past
+        // `max_scroll`. Mirrors `select_visible_line`'s visibility test.
+        let content_len = self.lines.len().saturating_sub(1);
+        if page_height >= content_len || self.selection < 3 {
             self.scroll = 0;
         } else if self.selection <= self.scroll {
             self.scroll = self.selection - 2;
         } else if self.selection > self.lines.len() - 2 {
-            self.scroll = self.lines.len() - page_height;
-        } else if self.selection >= self.scroll + page_height {
-            self.scroll = self.selection + 2 - page_height;
+            self.scroll = self.lines.len() - 1 - page_height;
+        } else if self.selection > self.scroll + page_height {
+            self.scroll = self.selection + 1 - page_height;
         }
     }
     pub fn selected_line(&self) -> &TreeLine {
@@ -681,5 +717,285 @@ impl Tree {
             warn!("failed to select {:?}", path);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for `Tree` — specifically the click-to-line mapping
+    //! after the "skip root row in body" change. Body row 0 must now
+    //! resolve to `lines[1]`, not `lines[0]`.
+    //!
+    //! Constructing a real `Tree` is awkward because `TreeLine` carries an
+    //! `fs::Metadata` field that can only be obtained from an actual
+    //! filesystem entry. We reuse `symlink_metadata(".")` for every test
+    //! line — the metadata content is irrelevant to the selection logic
+    //! under test; we only need a value of the right type.
+
+    use {
+        super::*,
+        std::{
+            fs,
+            path::PathBuf,
+        },
+    };
+
+    /// Build a synthetic `TreeLine` for use in selection-math tests.
+    /// All filesystem-dependent fields share the metadata of `"."`.
+    fn fake_line(
+        id: TreeLineId,
+        path: &str,
+        line_type: TreeLineType,
+    ) -> TreeLine {
+        let metadata = fs::symlink_metadata(".").expect("symlink_metadata of current dir works");
+        TreeLine {
+            id,
+            parent_id: if id == 0 { None } else { Some(0) },
+            left_branches: vec![false; 0].into_boxed_slice(),
+            depth: if id == 0 { 0 } else { 1 },
+            path: PathBuf::from(path),
+            subpath: path.to_string(),
+            icon: None,
+            name: path.to_string(),
+            line_type,
+            has_error: false,
+            nb_kept_children: 0,
+            unlisted: 0,
+            score: 0,
+            direct_match: false,
+            sum: None,
+            metadata,
+            git_status: None,
+        }
+    }
+
+    /// Build a `Tree` whose `lines.len() == n_children + 1` (root + children).
+    /// All children are `TreeLineType::File` and therefore selectable.
+    fn fake_tree(n_children: usize) -> Tree {
+        let mut lines = Vec::with_capacity(n_children + 1);
+        lines.push(fake_line(0, "/", TreeLineType::Dir));
+        for i in 1..=n_children {
+            lines.push(fake_line(i, &format!("/c{i}"), TreeLineType::File));
+        }
+        Tree {
+            lines,
+            next_line_id: n_children + 1,
+            selection: 0,
+            options: TreeOptions::default(),
+            scroll: 0,
+            total_search: false,
+            git_status: ComputationResult::None,
+            build_report: BuildReport::default(),
+        }
+    }
+
+    #[test]
+    fn try_select_y_maps_with_offset() {
+        // 5 lines = root + 4 children. Valid indices for click selection
+        // are body rows 0..=3, mapping to tree.lines[1..=4].
+        let mut tree = fake_tree(4);
+        assert_eq!(tree.lines.len(), 5);
+
+        // y=0 -> lines[1] (first child)
+        assert!(tree.try_select_y(0));
+        assert_eq!(tree.selection, 1);
+
+        // y=2 -> lines[3]
+        assert!(tree.try_select_y(2));
+        assert_eq!(tree.selection, 3);
+
+        // y=3 -> lines[4] (last child)
+        assert!(tree.try_select_y(3));
+        assert_eq!(tree.selection, 4);
+    }
+
+    #[test]
+    fn try_select_y_out_of_bounds_is_noop() {
+        // 5 lines, click at body row 4 (would resolve to lines[5]) is OOB.
+        // Existing semantics: return false, leave selection unchanged.
+        let mut tree = fake_tree(4);
+        tree.selection = 2;
+
+        assert!(!tree.try_select_y(4));
+        assert_eq!(tree.selection, 2, "OOB click must not change selection");
+
+        // Even further OOB.
+        assert!(!tree.try_select_y(100));
+        assert_eq!(tree.selection, 2);
+    }
+
+    #[test]
+    fn try_select_y_with_small_tree() {
+        // 2 lines = root + 1 child. Only body row 0 is valid.
+        let mut tree = fake_tree(1);
+        assert_eq!(tree.lines.len(), 2);
+
+        // y=0 -> lines[1].
+        assert!(tree.try_select_y(0));
+        assert_eq!(tree.selection, 1);
+
+        // y=1 -> lines[2] (OOB). No-op, no panic.
+        tree.selection = 1;
+        assert!(!tree.try_select_y(1));
+        assert_eq!(tree.selection, 1);
+    }
+
+    #[test]
+    fn try_select_y_with_scroll_offset() {
+        // 10 lines, scroll = 2: visible window starts at lines[3]
+        // (= 1 + scroll + 0). Body row 0 -> lines[3].
+        let mut tree = fake_tree(9);
+        assert_eq!(tree.lines.len(), 10);
+        tree.scroll = 2;
+
+        assert!(tree.try_select_y(0));
+        assert_eq!(tree.selection, 3);
+
+        assert!(tree.try_select_y(5));
+        assert_eq!(tree.selection, 8);
+
+        // y=7 -> lines[10] (OOB). Selection unchanged.
+        let prev = tree.selection;
+        assert!(!tree.try_select_y(7));
+        assert_eq!(tree.selection, prev);
+    }
+
+    #[test]
+    fn try_select_y_with_root_only_tree() {
+        // 1 line = root only. With the body offset (`y + 1 + scroll`)
+        // every body row resolves out-of-bounds; no click can select
+        // anything. This is the boundary that distinguishes +1 from
+        // +0 offset — under the old +0 mapping, y=0 would have
+        // selected lines[0] (the root) and the test would fail.
+        let mut tree = fake_tree(0);
+        assert_eq!(tree.lines.len(), 1);
+
+        // y=0 -> lines[1] (OOB)
+        let prev = tree.selection;
+        assert!(!tree.try_select_y(0));
+        assert_eq!(tree.selection, prev);
+
+        // y=5 -> lines[6] (OOB)
+        assert!(!tree.try_select_y(5));
+        assert_eq!(tree.selection, prev);
+    }
+
+    #[test]
+    fn try_select_y_skips_unselectable_line() {
+        // Replace one child with a `Pruning` line, which is unselectable.
+        let mut tree = fake_tree(3);
+        tree.lines[2].line_type = TreeLineType::Pruning;
+
+        // y=1 resolves to lines[2] which is Pruning -> returns false.
+        let prev = tree.selection;
+        assert!(!tree.try_select_y(1));
+        assert_eq!(tree.selection, prev);
+
+        // y=0 -> lines[1] (selectable file)
+        assert!(tree.try_select_y(0));
+        assert_eq!(tree.selection, 1);
+    }
+
+    //
+    // Scroll math: with the root-skip rendering, the scrollable content
+    // length is `lines.len() - 1` and the max valid scroll is
+    // `lines.len() - 1 - page_height`. These tests pin the off-by-one
+    // fixes in `try_scroll` and `make_selection_visible`.
+    //
+
+    #[test]
+    fn try_scroll_exact_fit_does_not_scroll() {
+        // 5 lines = root + 4 children, page_height = 4 → all four
+        // children fit on screen with no scroll needed. The
+        // pre-fix code returned `true` here (allowing scroll past
+        // the visible range), the fix returns `false`.
+        let mut tree = fake_tree(4);
+        assert_eq!(tree.lines.len(), 5);
+        assert!(!tree.try_scroll(1, 4));
+        assert_eq!(tree.scroll, 0);
+    }
+
+    #[test]
+    fn try_scroll_max_is_lines_len_minus_one_minus_page_height() {
+        // 10 lines = root + 9 children, page_height = 3 → at the
+        // bottom, the last visible row is body row 2, mapping to
+        // lines[2 + 1 + scroll] = lines[scroll + 3]. For this to be
+        // lines[9] (the last child), scroll = 6. So max scroll = 6,
+        // not 7 (which would put body row 2 at lines[10], OOB).
+        let mut tree = fake_tree(9);
+        assert!(tree.try_scroll(10, 3)); // request scroll 10, will be clamped
+        assert_eq!(
+            tree.scroll, 6,
+            "max scroll for 10 lines / page 3 must be 6, not 7",
+        );
+
+        // Now we should be unable to scroll further down.
+        assert!(!tree.try_scroll(1, 3));
+        assert_eq!(tree.scroll, 6);
+    }
+
+    #[test]
+    fn make_selection_visible_exact_fit_resets_scroll() {
+        // 5 lines, page_height = 4 → content fits exactly (4 children
+        // == 4 rows); scroll must reset to 0 regardless of selection.
+        let mut tree = fake_tree(4);
+        tree.scroll = 7; // junk scroll
+        tree.selection = 3;
+        tree.make_selection_visible(4);
+        assert_eq!(tree.scroll, 0);
+    }
+
+    #[test]
+    fn make_selection_visible_clamps_to_max_scroll() {
+        // 10 lines, page_height = 3. Selecting the last line should
+        // produce scroll = 6 (not 7 — see try_scroll_max test above).
+        let mut tree = fake_tree(9);
+        tree.selection = 9;
+        tree.make_selection_visible(3);
+        assert_eq!(
+            tree.scroll, 6,
+            "selecting the last line must produce max scroll = lines.len() - 1 - page_height",
+        );
+    }
+
+    #[test]
+    fn make_selection_visible_second_to_last_stays_at_max() {
+        // 10 lines, page_height = 3 → max scroll = 6.
+        // With selection = lines.len() - 2 = 8 (still visible at body
+        // row 2 when scroll = 6, since `scroll + page_height == 9` is
+        // the last visible index — wait: 8 == 6 + 2 == body row 1
+        // when scroll = 6; visible). The scroll-forward branch must
+        // NOT fire when selection sits exactly on the last visible row
+        // for a given scroll; and even when it does fire from a smaller
+        // scroll, the result must clamp to max = 6, not 7.
+        let mut tree = fake_tree(9);
+        tree.selection = 8;
+        tree.scroll = 4; // not yet showing line 8 (visible: scroll+1..=scroll+3 = 5..=7)
+        tree.make_selection_visible(3);
+        assert!(
+            tree.scroll <= 6,
+            "scroll must not exceed max=6 for 10 lines / page 3, got {}",
+            tree.scroll,
+        );
+        // The selection must end up visible: scroll+1 <= 8 <= scroll+3.
+        assert!(tree.selection >= tree.scroll + 1);
+        assert!(tree.selection <= tree.scroll + 3);
+    }
+
+    #[test]
+    fn make_selection_visible_does_not_scroll_when_selection_at_last_visible_row() {
+        // 10 lines, page_height = 3. With scroll = 5, visible body
+        // lines are scroll+1..=scroll+3 = 6..=8. Setting selection = 8
+        // (last visible row) must NOT trigger any scroll — the row is
+        // still in view. Pre-fix code used `>=`, which fired here and
+        // pushed scroll to 7 (one past max).
+        let mut tree = fake_tree(9);
+        tree.scroll = 5;
+        tree.selection = 8;
+        tree.make_selection_visible(3);
+        assert_eq!(
+            tree.scroll, 5,
+            "selection on the last visible row must not trigger a scroll",
+        );
     }
 }
