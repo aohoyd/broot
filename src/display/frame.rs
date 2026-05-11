@@ -125,21 +125,42 @@ pub(crate) fn draw_frame<W: Write>(
 /// Empty title or area too narrow → no-op.
 ///
 /// Uses `palette.frame_title` for styling (typically a bold accent).
+///
+/// `selected`: when `true`, the title is painted with a compound style
+/// derived from `palette.frame_title` but with its background overlaid
+/// from `palette.selected_line.bg`. This signals that the (hidden) tree
+/// root row is the current selection. The fg / attrs of `frame_title`
+/// are preserved. If the skin's `selected_line` has no bg the overlay
+/// is a no-op and the title falls back to the unstyled `frame_title`
+/// look — no panic, no visible bg change. Pass `false` from panels that
+/// have no selectable root (overlay modals, preview / stage / help).
 pub(crate) fn draw_frame_title<W: Write>(
     w: &mut W,
     area: Area,
     palette: &StyleMap,
     title: &str,
+    selected: bool,
 ) -> io::Result<()> {
     if title.is_empty() || area.width < 6 {
         return Ok(());
     }
-    let style_ref = &palette.frame_title;
     let max_title_width = area.width.saturating_sub(4) as usize;
     let title = truncate_to_width(title, max_title_width);
     if title.is_empty() {
         return Ok(());
     }
+
+    let overlay: Option<termimad::CompoundStyle> = if selected {
+        let mut s = palette.frame_title.clone();
+        if let Some(bg) = palette.selected_line.get_bg() {
+            s.set_bg(bg);
+        }
+        Some(s)
+    } else {
+        None
+    };
+    let style_ref = overlay.as_ref().unwrap_or(&palette.frame_title);
+
     w.queue(cursor::MoveTo(area.left + 1, area.top))?;
     style_ref.queue(w, ' ').map_err(io_err)?;
     style_ref.queue_str(w, &title).map_err(io_err)?;
@@ -559,9 +580,42 @@ mod tests {
         let palette = StyleMap::no_term();
         let mut buf: Vec<u8> = Vec::new();
         let area = Area::new(0, 0, 30, 4);
-        draw_frame_title(&mut buf, area, &palette, "hello").unwrap();
+        draw_frame_title(&mut buf, area, &palette, "hello", false).unwrap();
         let s = String::from_utf8(buf).expect("title output should be valid UTF-8");
         assert!(s.contains("hello"), "missing title in: {:?}", s);
+    }
+
+    #[test]
+    fn draw_frame_title_emits_sgr_when_palette_is_styled() {
+        // Pin: with a styled `StyleMap` (the real default), the title
+        // bytes include CSI/SGR escape sequences for the `frame_title`
+        // style. `no_term()` strips all terminal control bytes; the
+        // styled path must NOT — otherwise the title would render
+        // un-bolded on real terminals.
+        use {
+            crate::skin::SkinEntry,
+            rustc_hash::FxHashMap,
+        };
+        let entry =
+            SkinEntry::parse("Yellow None Bold").expect("parse Yellow None Bold");
+        let mut overrides: FxHashMap<String, SkinEntry> = FxHashMap::default();
+        overrides.insert("frame_title".to_string(), entry);
+        let maps = crate::skin::StyleMaps::create(&overrides);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let area = Area::new(0, 0, 30, 4);
+        draw_frame_title(&mut buf, area, &maps.focused, "hello", false).unwrap();
+        let s = String::from_utf8_lossy(&buf).into_owned();
+        // The CSI introducer `\u{1b}[` (ESC + '[') must appear at
+        // least once, proving the renderer emitted SGR codes for the
+        // styled compound. Don't pin the exact code so a parser
+        // tweak in termimad doesn't break this test.
+        assert!(
+            s.contains("\u{1b}["),
+            "expected SGR escape in styled output, got: {:?}",
+            s,
+        );
+        assert!(s.contains("hello"));
     }
 
     #[test]
@@ -570,14 +624,14 @@ mod tests {
         // Empty title → nothing visible
         let mut buf: Vec<u8> = Vec::new();
         let area = Area::new(0, 0, 30, 4);
-        draw_frame_title(&mut buf, area, &palette, "").unwrap();
+        draw_frame_title(&mut buf, area, &palette, "", false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("hello"));
 
         // Width < 6 → nothing visible
         let mut buf: Vec<u8> = Vec::new();
         let area = Area::new(0, 0, 5, 4);
-        draw_frame_title(&mut buf, area, &palette, "hello").unwrap();
+        draw_frame_title(&mut buf, area, &palette, "hello", false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("hello"));
     }
@@ -590,10 +644,103 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         let area = Area::new(0, 0, 20, 5);
         draw_frame(&mut buf, area.clone(), &palette, &FrameStyle::rounded()).unwrap();
-        draw_frame_title(&mut buf, area, &palette, "/tmp/x").unwrap();
+        draw_frame_title(&mut buf, area, &palette, "/tmp/x", false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains('╭'));
         assert!(s.contains('╰'));
         assert!(s.contains("/tmp/x"), "title missing in: {:?}", s);
+    }
+
+    #[test]
+    fn draw_frame_title_selected_emits_selection_bg() {
+        use {
+            crate::skin::SkinEntry,
+            rustc_hash::FxHashMap,
+        };
+        // Build a StyleMap where both frame_title and selected_line are
+        // styled with distinct, terminal-visible colours, so the SGR
+        // bytes for "selected" must differ from "unselected".
+        let mut overrides: FxHashMap<String, SkinEntry> = FxHashMap::default();
+        overrides.insert(
+            "frame_title".to_string(),
+            SkinEntry::parse("Yellow None Bold").expect("parse frame_title"),
+        );
+        overrides.insert(
+            "selected_line".to_string(),
+            SkinEntry::parse("None Blue").expect("parse selected_line"),
+        );
+        let maps = crate::skin::StyleMaps::create(&overrides);
+
+        let area = Area::new(0, 0, 30, 4);
+
+        let mut buf_unselected: Vec<u8> = Vec::new();
+        draw_frame_title(&mut buf_unselected, area.clone(), &maps.focused, "hello", false).unwrap();
+
+        let mut buf_selected: Vec<u8> = Vec::new();
+        draw_frame_title(&mut buf_selected, area, &maps.focused, "hello", true).unwrap();
+
+        assert_ne!(
+            buf_unselected, buf_selected,
+            "selected title must emit different SGR bytes than unselected",
+        );
+        let s_sel = String::from_utf8_lossy(&buf_selected);
+        assert!(s_sel.contains("hello"));
+
+        // Verify it's specifically a *Blue background* change. The
+        // unselected `frame_title` already carries its own bg (the
+        // default panel-alt rgb(9,16,27) is emitted via `48;2;9;16;27m`),
+        // so the bare `48;` introducer is not a discriminator. Termimad
+        // parses the bare colour name "Blue" through crossterm, which
+        // emits it as the bright/indexed `48;5;12m` form; the
+        // legacy-named `\x1b[44m` form is also accepted in case the
+        // encoding ever changes. The pinning is: the selected buf must
+        // contain SOME Blue-bg encoding that the unselected buf does
+        // NOT contain. We can't assert a fixed byte string without
+        // brittleness, so the assertion compares the *set* of bg
+        // sequences between the two bufs and requires the selected one
+        // to be a strict superset.
+        let unsel = String::from_utf8_lossy(&buf_unselected);
+        // Recognise both common Blue-bg encodings; if termimad's
+        // encoder changes again, extend this list.
+        const BLUE_BG_FORMS: &[&str] = &[
+            "\u{1b}[44m",
+            ";44m",
+            "48;5;12m", // crossterm/termimad's "Blue" → bright blue idx
+            "48;5;4m",  // legacy ANSI idx Blue
+            "48;2;0;0;255", // truecolour Blue
+        ];
+        let sel_has_blue = BLUE_BG_FORMS.iter().any(|f| s_sel.contains(f));
+        let unsel_has_blue = BLUE_BG_FORMS.iter().any(|f| unsel.contains(f));
+        assert!(
+            sel_has_blue,
+            "selected buf should contain a Blue bg SGR: {:?}",
+            s_sel,
+        );
+        assert!(
+            !unsel_has_blue,
+            "unselected buf should NOT contain a Blue bg SGR: {:?}",
+            unsel,
+        );
+    }
+
+    #[test]
+    fn draw_frame_title_selected_no_bg_falls_back_to_unstyled_title() {
+        // `StyleMap::no_term()` has no terminal styling at all → no bg on
+        // `selected_line`. The selected branch should clone `frame_title`,
+        // try to overlay a bg, find none, and emit the same bytes as the
+        // unselected branch. Pins the no-bg fallback path.
+        let palette = StyleMap::no_term();
+        let area = Area::new(0, 0, 30, 4);
+
+        let mut buf_unselected: Vec<u8> = Vec::new();
+        draw_frame_title(&mut buf_unselected, area.clone(), &palette, "hello", false).unwrap();
+
+        let mut buf_selected: Vec<u8> = Vec::new();
+        draw_frame_title(&mut buf_selected, area, &palette, "hello", true).unwrap();
+
+        assert_eq!(
+            buf_unselected, buf_selected,
+            "with no selected_line.bg the selected branch must be a no-op",
+        );
     }
 }

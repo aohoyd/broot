@@ -16,7 +16,7 @@ status row) paints into `state`. Mixing them either draws on top of the
 frame or leaves a 1-cell gap.
 
 `BrowserState::page_height` returns `screen.height - 4`
-(`src/browser/browser_state.rs:112-117`): minus 1 for the input row,
+(`src/browser/browser_state.rs:118-124`): minus 1 for the input row,
 1 for the status row, and 1 for each of the top/bottom frame edges.
 Any new `PanelState` impl that does its own page arithmetic must
 mirror this — see `move_selection` / `try_select_next_filtered` for the
@@ -169,9 +169,172 @@ than an intentional disable; users who want no icons should write
 `icon_theme: none`.
 
 Nerd Font glyphs are PUA codepoints. `unicode-width` reports them as
-1 cell, but the renderer pattern at
-`src/display/displayable_tree.rs:320-323` is `icon` + space + space —
-three cells in total. This is intentional: the glyphs visually need
-extra breathing room in most terminals, and the column math elsewhere
-in the tree depends on this fixed 3-cell prefix. Do not "fix" the
-width counting to 2 cells.
+1 cell, and the renderer pattern at
+`src/display/displayable_tree.rs:314-316` is `icon` + space — two cells
+in total. This was reduced from a 3-cell prefix in a prior pass after a
+user bug report about over-wide icon columns; the column math elsewhere
+in the tree assumes this 2-cell prefix. If you change the spacing,
+audit the callers that compute `cw.allowed`-style budgets and the
+content-extract path that subtracts a small constant from `cw.allowed`.
+
+## Footer-zone theming
+
+All thirteen footer-zone style keys default to background `rgb(6, 11, 20)`
+(panel_alt), so the status row, input row, and flag hints share the
+dark-blue chrome. The keys are: `status_normal`, `status_italic`,
+`status_bold`, `status_code`, `status_ellipsis`, `status_job`,
+`flag_label`, `flag_value`, `input`, `purpose_normal`,
+`purpose_italic`, `purpose_bold`, `purpose_ellipsis`. See the table at
+`src/skin/style_map.rs:161-241`.
+
+Two intentional exceptions: `status_error` keeps `rgb(224, 90, 90)`
+(cut_bar red) so errors visually dominate the row; `mode_command_mark`
+inverts with `rgb(255, 178, 86)` (accent_warn) bg + `rgb(9, 16, 27)`
+fg + Bold so the command-mode caret stays the most prominent glyph on
+screen.
+
+User `skin:` overrides still beat these defaults — the override path
+through the `StyleMap!` macro (`src/skin/style_map.rs:69-105`) is
+unchanged. The pin test `footer_zone_uses_panel_alt_bg` at
+`src/skin/style_map.rs:298-326` prevents silent palette drift; if you
+intentionally edit the defaults, update the test alongside or it will
+catch you. `mode_command_mark` has its own pinned test
+(`mode_command_mark_uses_accent_warn_bg` at
+`src/skin/style_map.rs:371-381`) because its bg differs by design.
+
+## Preview frame title
+
+`PreviewState::frame_title(max_width)` (`src/preview/preview_state.rs:166-198`)
+returns `"{filename}  •  {info}"` when `Preview::info_string()` returns
+`Some` (`Preview::info_string` in `src/preview/preview.rs`), else just
+the filename. The bullet character is U+2022 (` • `) surrounded by 2
+spaces each side. Truncation policy: when the full string overflows
+`max_width`, the filename is truncated from the right with `…`; the
+info clause (short and informative) is never truncated. If even the
+filename + bullet won't fit, the title falls back to a bare truncated
+filename — no `•` appears. Empty / missing filename renders as
+`"???"`. `frame_title` returns `String` per the trait at
+`src/app/panel_state.rs:1154-1162`, not `Option<String>` — there is no
+no-op signal; the default and the `PreviewState` override both always
+return a non-empty fallback (`default_frame_title_for_type` for the
+default; `"???"` for the override's missing-filename case).
+
+The body row that used to hold filename + count is gone — content
+paints from `state_area.top` directly (was `state_area.top + 1`), and
+`self.preview_area = state_area.clone()` at
+`src/preview/preview_state.rs:350` (no longer insets the area). The
+per-variant `display_info` painters (in `src/preview/dir_view.rs`,
+`src/syntactic/text_view.rs`, `src/hex/hex_view.rs`,
+`src/image/image_view.rs`, `src/tty/tty_view.rs`) and the
+`Preview::display_info` dispatcher were deleted with the body-row
+removal; their text replacement is `info_string`, consumed by
+`frame_title`.
+
+## Tree root row + aux status
+
+`tree.lines[0]` still exists in memory as the root, but is **never
+painted** by `DisplayableTree::write_on`. The body loop iterates
+`tree.lines[1..]` starting at `state_area.top` (not
+`state_area.top + 1`); see `src/display/displayable_tree.rs` where
+`line_index = (y as usize) + 1 + tree.scroll`. The scrollbar offset
+starts at `area.top` and spans `area.height`, with total content rows
+`tree.lines.len() - 1`. The scrollbar paint loop writes to absolute
+row `y + self.area.top` (not the loop counter `y`) and compares
+against `compute_scrollbar`'s absolute `sctop`/`scbottom` — get this
+wrong and the thumb paints over the frame's top corner.
+
+Scroll math is interlocked with the +1 offset:
+- `Tree::try_scroll` uses `lines.len() - 1` as the scrollable length
+  and `lines.len() - 1 - page_height` as the max scroll.
+- `Tree::make_selection_visible` mirrors the same: "everything fits"
+  is `page_height >= lines.len() - 1`, and the clamp-to-bottom branch
+  is `scroll = lines.len() - 1 - page_height`.
+
+Click mapping: `Tree::try_select_y` maps a body y to
+`lines[y + 1 + scroll]`. Out-of-bounds returns `false` and leaves
+selection alone. `BrowserState::on_click` first subtracts the cached
+`body_top` (set during `display`) before calling `try_select_y` —
+clicks arrive in absolute terminal coords, the body row math is body-
+relative. `BrowserState::on_double_click` reconstructs the
+`line_index` from `y` the same way and compares to `tree.selection`,
+not to `y` (the post-shift selection is `line_index`, not `y`).
+
+`BrowserState::page_height` is unchanged at `screen.height - 4` — the
+freed root-row cell becomes one extra visible entry, the geometry
+math doesn't move. `Internal::back`, `Internal::focus`, and
+`BrowserState::open_selection_stay_in_broot` all key off
+`tree.selection == 0`, which is still valid because the data model
+didn't move; only rendering shifted.
+
+The three pieces of aux info that used to decorate the root row (git
+status summary, total size when `show_sizes`, mount-space bar when
+`show_root_fs`) now live at the right end of the wide status row.
+The data flows through `PanelState::status_aux` (trait default
+`None` at `src/app/panel_state.rs:1170`; only `BrowserState` overrides
+at `src/browser/browser_state.rs:866-883`). The carrier type
+`StatusAux` lives at `src/display/status_aux.rs`. Paint geometry lives
+in `src/display/status_line.rs:37-101`: aux is suppressed when
+`status.error == true` (errors win the row), when the row is too
+narrow (`aux_w + 4 > total_after_leading`), or when the aux is empty.
+Active-panel gating happens upstream — `WIDE_STATUS = true` means only
+the active panel calls `write_status`, so aux follows automatically
+without per-panel checks.
+
+The dead `write_root_line` painter was deleted entirely during the
+migration (along with the orphan `GitStatusDisplay`, `ComputationResult`,
+`UnicodeWidthChar`, `UnicodeWidthStr` imports in
+`displayable_tree.rs`). Restoring root-row rendering would mean
+rebuilding that painter and gating the body loop on a new toggle —
+not a trivial revert.
+
+## Frame title as selectable root
+
+The frame title is the visual carrier for the (still-hidden) tree
+root row's selection state. `PanelState::title_selected()` is the
+trait hook (default `false` at `src/app/panel_state.rs:1190`); only
+`BrowserState` overrides it, returning `displayed_tree().selection == 0`
+(`src/browser/browser_state.rs:956`). Future tree-like panels can opt in
+by overriding — every other panel type (Preview, Stage, Trash, Help,
+Fs) keeps the default and its title never highlights.
+
+Inactive panels still paint their title with the selection bg when
+`title_selected()` returns true — this mirrors the body's
+`selected_line` paint at `src/display/displayable_tree.rs:495`, which
+gates on `in_app` but not on `active`. So an inactive browser panel
+whose `selection == 0` shows a subtly-highlighted title using
+`unfocused.styles.selected_line.bg`, the same way its body row would
+have. Don't gate the title on `active` without also gating the body's
+selection paint — they're a pair.
+
+`draw_frame_title` (`src/display/frame.rs:137`) takes a
+`selected: bool`. When true, it clones the `frame_title` compound
+style and overlays `selected_line.get_bg()` onto it — fg/attrs of
+`frame_title` are preserved. If a custom skin leaves `selected_line`
+without a bg, the overlay is a no-op and the title falls back to the
+unstyled `frame_title` look (no panic, no visible bg). No new style
+key was added; the selected variant is a pure composition of two
+existing keys.
+
+`BrowserState::on_click` routes through `try_select_title_row(y)`
+before `body_relative_y(y)`. The helper sets `selection = 0` when
+`body_top > 0 && y == body_top - 1`. When it returns `true`,
+`on_click` returns `CmdResult::Keep` immediately and skips the
+body-relative `try_select_y` path — that short-circuit is what makes a
+title-row click semantically distinct from a body row's coordinate
+math. `on_double_click` follows the same pattern but additionally
+dispatches to `open_selection_stay_in_broot` after the title-row
+intercept, which means a double-click on the title navigates up
+(open_selection treats `selection == 0` as "go to parent"). The
+`body_top > 0` guard is load-bearing — on degenerate tiny terminals
+the frame collapses and `body_top == 0`, where `body_top - 1` would
+underflow `u16`. The narrow-panel case (`3 <= outer.width < 6`, where
+the top frame edge is drawn but no title glyph is painted) is
+deliberately not width-gated: a click on that edge still selects the
+root, matching the "top edge is the root's seat" intent. Those panels
+are pathological at that width anyway.
+
+Three production call sites pass the `selected` arg: the panel render
+in `src/app/app_panels.rs:712` forwards `panel.state().title_selected()`;
+the two overlay renderers (`src/app/overlay/goto.rs:195`,
+`src/app/overlay/confirm.rs:185`) always pass `false` — overlays have
+no selectable root.

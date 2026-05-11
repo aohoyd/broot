@@ -709,7 +709,14 @@ impl AppPanelsAndInputs {
                     let title = panel
                         .state()
                         .frame_title(outer.width.saturating_sub(4));
-                    frame::draw_frame_title(w, outer.clone(), &panel_skin.styles, &title)?;
+                    let title_selected = panel.state().title_selected();
+                    frame::draw_frame_title(
+                        w,
+                        outer.clone(),
+                        &panel_skin.styles,
+                        &title,
+                        title_selected,
+                    )?;
                 }
             }
             let disc = DisplayContext {

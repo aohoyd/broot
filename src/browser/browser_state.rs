@@ -10,7 +10,7 @@ use {
         pattern::*,
         print,
         stage::*,
-        task_sync::Dam,
+        task_sync::{ComputationResult, Dam},
         tree::*,
         tree_build::TreeBuilder,
         verb::*,
@@ -26,6 +26,11 @@ pub struct BrowserState {
     pub filtered_tree: Option<Tree>,
     mode: Mode,                        // whether we're in 'input' or 'normal' mode
     pending_task: Option<BrowserTask>, // note: there are some other pending task, see
+    /// Top row (absolute) of the body region as last painted. Cached so
+    /// click coordinates (which arrive in absolute terminal coords) can be
+    /// translated to body-relative coords for `Tree::try_select_y`. `0`
+    /// before the first render (no click possible before then).
+    body_top: u16,
 }
 
 /// A task that can be computed in background
@@ -71,6 +76,7 @@ impl BrowserState {
             filtered_tree: None,
             mode: con.initial_mode(),
             pending_task,
+            body_top: 0,
         })
     }
 
@@ -115,6 +121,48 @@ impl BrowserState {
         //   - 1 top frame edge + 1 bottom frame edge inset by the panel frame
         // Use saturating_sub so very small terminals don't underflow.
         (screen.height as usize).saturating_sub(4)
+    }
+
+    /// Translate an absolute terminal y to a body-relative y, or `None`
+    /// if the click is above the body (frame border).
+    ///
+    /// Title row clicks never reach this helper: `on_click` /
+    /// `on_double_click` intercept them via `try_select_title_row`
+    /// before delegating here, so the only y < body_top case left is
+    /// the top frame edge.
+    ///
+    /// Body row 0 sits at `self.body_top` (== `state.top` after the frame
+    /// inset, set during `display`). `try_select_y` expects body-relative
+    /// y and maps it to `lines[y + 1 + scroll]`.
+    fn body_relative_y(&self, y: u16) -> Option<usize> {
+        if y >= self.body_top {
+            Some((y - self.body_top) as usize)
+        } else {
+            None
+        }
+    }
+
+    /// If `y` is the title row (body_top - 1), reset selection to 0
+    /// and return true. Otherwise return false. Underflow-safe — when
+    /// `body_top == 0` the frame has collapsed and there is no title
+    /// row to click.
+    ///
+    /// Width note: the title glyph itself is only painted when
+    /// `outer.width >= 6` (see `app_panels.rs`); for narrower panels
+    /// (3..6) the top frame edge is still drawn but carries no visible
+    /// title. We deliberately do NOT plumb width into this helper —
+    /// clicks on the top edge of those pathological panels still select
+    /// the root, matching the spirit of "the top frame edge is the
+    /// root's seat". Pathological because preview / stage / tree panels
+    /// at that width are essentially unusable for their primary purpose
+    /// anyway.
+    fn try_select_title_row(&mut self, y: u16) -> bool {
+        if self.body_top > 0 && y == self.body_top - 1 {
+            self.displayed_tree_mut().selection = 0;
+            true
+        } else {
+            false
+        }
     }
 
     /// return a reference to the currently displayed tree, which
@@ -293,7 +341,12 @@ impl PanelState for BrowserState {
         _screen: Screen,
         _con: &AppContext,
     ) -> Result<CmdResult, ProgramError> {
-        self.displayed_tree_mut().try_select_y(y as usize);
+        if self.try_select_title_row(y) {
+            return Ok(CmdResult::Keep);
+        }
+        if let Some(body_y) = self.body_relative_y(y) {
+            self.displayed_tree_mut().try_select_y(body_y);
+        }
         Ok(CmdResult::Keep)
     }
 
@@ -304,12 +357,27 @@ impl PanelState for BrowserState {
         screen: Screen,
         con: &AppContext,
     ) -> Result<CmdResult, ProgramError> {
-        if self.displayed_tree().selection == y as usize {
+        // Double-click on the title row navigates up. `try_select_title_row`
+        // already pinned `selection = 0` from the preceding single click,
+        // and `open_selection_stay_in_broot` treats `selection == 0` as
+        // "go to parent" — so the title becomes a click-target for the
+        // implicit parent directory.
+        if self.try_select_title_row(y) {
+            return self.open_selection_stay_in_broot(screen, con, false, false);
+        }
+        // A double-click always follows a simple click at the same y, so the
+        // previous click already updated `selection` to the line under the
+        // pointer. Recompute the same line index from `y` and compare to
+        // `selection`: if they match the line was selectable and openable.
+        let Some(body_y) = self.body_relative_y(y) else {
+            return Ok(CmdResult::Keep);
+        };
+        let tree = self.displayed_tree();
+        let line_index = body_y + 1 + tree.scroll;
+        if tree.selection == line_index {
             self.open_selection_stay_in_broot(screen, con, false, false)
         } else {
-            // A double click always come after a simple click at
-            // same position. If it's not the selected line, it means
-            // the click wasn't on a selectable/openable tree line
+            // click wasn't on a selectable/openable tree line
             Ok(CmdResult::Keep)
         }
     }
@@ -820,6 +888,10 @@ impl PanelState for BrowserState {
         w: &mut W,
         disc: &DisplayContext,
     ) -> Result<(), ProgramError> {
+        // Cache the body region's top row so subsequent clicks can be
+        // translated from absolute terminal coords back to body-relative
+        // coords (the click handlers don't receive the panel `Areas`).
+        self.body_top = disc.state_area.top;
         let dp = DisplayableTree {
             app_state: Some(disc.app_state),
             tree: self.displayed_tree(),
@@ -851,6 +923,38 @@ impl PanelState for BrowserState {
             }
             None => &self.tree.options.pattern,
         })
+    }
+
+    /// Build the right-aligned status-row aux block.
+    ///
+    /// Surfaces three optional pieces that used to decorate the (now
+    /// hidden) tree root row:
+    /// - git status summary (when `tree.git_status` is computed)
+    /// - total size of the tree (when `tree.options.show_sizes`)
+    /// - mount-space widget (when `tree.options.show_root_fs`)
+    ///
+    /// Returns `None` when nothing applies so the status row painter can
+    /// skip the right-alignment math entirely.
+    fn status_aux(&self) -> Option<StatusAux> {
+        let tree = self.displayed_tree();
+        let mut aux = StatusAux::default();
+        if let ComputationResult::Done(git_status) = &tree.git_status {
+            aux.git_summary = status_aux::format_git_summary(git_status);
+        }
+        if tree.options.show_sizes {
+            if let Some(sum) = tree.lines[0].sum {
+                aux.total_size = Some(file_size::fit_4(sum.to_size()));
+            }
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        if tree.options.show_root_fs {
+            aux.mount = tree.lines[0].mount();
+        }
+        if aux.is_empty() { None } else { Some(aux) }
+    }
+
+    fn title_selected(&self) -> bool {
+        self.displayed_tree().selection == 0
     }
 
     fn get_flags(&self) -> Vec<Flag> {
@@ -908,5 +1012,414 @@ mod tests {
     fn page_height_zero_does_not_underflow() {
         // 0 rows must not wrap around via unsigned underflow.
         assert_eq!(BrowserState::page_height(screen(0)), 0);
+    }
+
+    //
+    // status_aux tests
+    //
+    // Real `BrowserState::new` would need an `AppContext` (heavy). We build
+    // the state directly from its public-ish fields. `TreeLine` carries a
+    // `fs::Metadata`; we reuse `symlink_metadata(".")` for it — its content
+    // is irrelevant to the aux logic.
+    //
+
+    use {
+        crate::{
+            file_sum::FileSum,
+            git::TreeGitStatus,
+            task_sync::ComputationResult,
+            tree::{
+                TreeLine,
+                TreeLineId,
+                TreeLineType,
+                TreeOptions,
+            },
+            tree_build::BuildReport,
+        },
+        std::{fs, path::PathBuf},
+    };
+
+    fn fake_root_line(sum: Option<FileSum>) -> TreeLine {
+        let metadata =
+            fs::symlink_metadata(".").expect("symlink_metadata of current dir works");
+        TreeLine {
+            id: 0 as TreeLineId,
+            parent_id: None,
+            left_branches: vec![false; 0].into_boxed_slice(),
+            depth: 0,
+            path: PathBuf::from("/"),
+            subpath: "/".to_string(),
+            icon: None,
+            name: "/".to_string(),
+            line_type: TreeLineType::Dir,
+            has_error: false,
+            nb_kept_children: 0,
+            unlisted: 0,
+            score: 0,
+            direct_match: false,
+            sum,
+            metadata,
+            git_status: None,
+        }
+    }
+
+    fn fake_browser_state(
+        sum: Option<FileSum>,
+        show_sizes: bool,
+        git: ComputationResult<TreeGitStatus>,
+    ) -> BrowserState {
+        let mut options = TreeOptions::default();
+        options.show_sizes = show_sizes;
+        let tree = Tree {
+            lines: vec![fake_root_line(sum)],
+            next_line_id: 1,
+            selection: 0,
+            options,
+            scroll: 0,
+            total_search: false,
+            git_status: git,
+            build_report: BuildReport::default(),
+        };
+        BrowserState {
+            tree,
+            filtered_tree: None,
+            mode: Mode::Input,
+            pending_task: None,
+            body_top: 0,
+        }
+    }
+
+    #[test]
+    fn aux_status_none_when_no_toggles_and_no_git() {
+        let state = fake_browser_state(None, false, ComputationResult::None);
+        assert!(state.status_aux().is_none());
+    }
+
+    #[test]
+    fn aux_status_some_when_sizes_on_with_sum() {
+        let sum = FileSum::new(1024, false, 1, 0);
+        let state = fake_browser_state(Some(sum), true, ComputationResult::None);
+        let aux = state.status_aux().expect("aux present");
+        assert!(aux.total_size.is_some(), "total_size should be populated");
+        assert!(aux.git_summary.is_none());
+    }
+
+    #[test]
+    fn aux_status_skips_sizes_when_no_sum_even_if_toggle_on() {
+        // Toggle is on but the root line has no measured `sum` -> no aux piece.
+        let state = fake_browser_state(None, true, ComputationResult::None);
+        // No git, no measurable size, no mount toggle -> aux is None.
+        assert!(state.status_aux().is_none());
+    }
+
+    #[test]
+    fn aux_status_includes_git_summary_when_done() {
+        let git = ComputationResult::Done(TreeGitStatus {
+            current_branch_name: Some("trunk".to_string()),
+            insertions: 2,
+            deletions: 1,
+        });
+        let state = fake_browser_state(None, false, git);
+        let aux = state.status_aux().expect("aux present");
+        let summary = aux.git_summary.expect("git summary populated");
+        assert!(summary.contains("trunk"));
+        assert!(summary.contains("+2-1"));
+    }
+
+    #[test]
+    fn aux_status_skips_git_when_not_computed() {
+        // ComputationResult::NotComputed must be treated the same as
+        // None — no git summary surfaces until the value is `Done`.
+        let state = fake_browser_state(None, false, ComputationResult::NotComputed);
+        assert!(state.status_aux().is_none());
+    }
+
+    #[test]
+    fn aux_status_combines_git_and_size() {
+        let sum = FileSum::new(2048, false, 1, 0);
+        let git = ComputationResult::Done(TreeGitStatus {
+            current_branch_name: Some("main".to_string()),
+            insertions: 0,
+            deletions: 0,
+        });
+        let state = fake_browser_state(Some(sum), true, git);
+        let aux = state.status_aux().expect("aux present");
+        assert!(aux.git_summary.is_some());
+        assert!(aux.total_size.is_some());
+    }
+
+    //
+    // body_relative_y / click-translation tests
+    //
+    // Pin the Phase 1 fix: clicks arrive in absolute terminal y, the body
+    // row math is body-relative. `BrowserState::on_click` must subtract
+    // `self.body_top` before calling `Tree::try_select_y`. Phase 2 caught
+    // that this critical fix was untested.
+    //
+
+    fn fake_child_line(id: u32, name: &str) -> TreeLine {
+        let metadata =
+            fs::symlink_metadata(".").expect("symlink_metadata of current dir works");
+        TreeLine {
+            id: id as TreeLineId,
+            parent_id: Some(0 as TreeLineId),
+            left_branches: vec![false; 1].into_boxed_slice(),
+            depth: 1,
+            path: PathBuf::from(format!("/{name}")),
+            subpath: name.to_string(),
+            icon: None,
+            name: name.to_string(),
+            line_type: TreeLineType::File,
+            has_error: false,
+            nb_kept_children: 0,
+            unlisted: 0,
+            score: 0,
+            direct_match: false,
+            sum: None,
+            metadata,
+            git_status: None,
+        }
+    }
+
+    fn fake_browser_state_with_children(body_top: u16, n: u32) -> BrowserState {
+        let mut lines = vec![fake_root_line(None)];
+        for i in 1..=n {
+            lines.push(fake_child_line(i, &format!("child{i}")));
+        }
+        let tree = Tree {
+            lines,
+            next_line_id: (n + 1) as TreeLineId,
+            selection: 0,
+            options: TreeOptions::default(),
+            scroll: 0,
+            total_search: false,
+            git_status: ComputationResult::None,
+            build_report: BuildReport::default(),
+        };
+        BrowserState {
+            tree,
+            filtered_tree: None,
+            mode: Mode::Input,
+            pending_task: None,
+            body_top,
+        }
+    }
+
+    #[test]
+    fn body_relative_y_subtracts_body_top() {
+        let state = fake_browser_state_with_children(3, 4);
+        // y at the frame border / title rows → None
+        assert_eq!(state.body_relative_y(0), None);
+        assert_eq!(state.body_relative_y(2), None);
+        // y at first body row (body_top) → 0
+        assert_eq!(state.body_relative_y(3), Some(0));
+        // y at body_top + k → k
+        assert_eq!(state.body_relative_y(5), Some(2));
+    }
+
+    #[test]
+    fn body_relative_y_zero_body_top_is_identity() {
+        let state = fake_browser_state_with_children(0, 4);
+        assert_eq!(state.body_relative_y(0), Some(0));
+        assert_eq!(state.body_relative_y(3), Some(3));
+    }
+
+    #[test]
+    fn click_translation_selects_correct_child_when_body_top_nonzero() {
+        // body_top = 3, tree = [root, child1, child2, child3, child4]
+        // A click at absolute y=3 should select lines[1] (first child).
+        // A click at absolute y=4 should select lines[2].
+        //
+        // The Phase 1 bug was passing absolute y straight to try_select_y,
+        // which (with the +1 root-shift) would have mapped y=3 → lines[4]
+        // (4th child), not lines[1] (first child).
+        let mut state = fake_browser_state_with_children(3, 4);
+
+        let body_y = state.body_relative_y(3).expect("y=3 inside body");
+        assert_eq!(body_y, 0);
+        state.displayed_tree_mut().try_select_y(body_y);
+        assert_eq!(
+            state.displayed_tree().selection,
+            1,
+            "click at body_top should select lines[1] (first child), not lines[1 + body_top]"
+        );
+
+        let body_y = state.body_relative_y(5).expect("y=5 inside body");
+        assert_eq!(body_y, 2);
+        state.displayed_tree_mut().try_select_y(body_y);
+        assert_eq!(
+            state.displayed_tree().selection,
+            3,
+            "click at body_top + 2 should select lines[3]"
+        );
+    }
+
+    #[test]
+    fn click_translation_above_body_is_noop() {
+        // Click at y < body_top (frame border) yields None and selection
+        // is not modified.
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 2; // pre-existing selection
+
+        assert_eq!(state.body_relative_y(0), None);
+        assert_eq!(state.body_relative_y(2), None);
+        // Verify selection unchanged (no try_select_y call was made on None).
+        assert_eq!(state.displayed_tree().selection, 2);
+    }
+
+    #[test]
+    fn title_selected_true_when_root_selected() {
+        let state = fake_browser_state_with_children(3, 4);
+        // default selection in fake_browser_state_with_children is 0
+        assert!(state.title_selected());
+    }
+
+    #[test]
+    fn title_selected_false_when_child_selected() {
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 2;
+        assert!(!state.title_selected());
+    }
+
+    #[test]
+    fn try_select_title_row_at_title_y_selects_root() {
+        // body_top = 3 → title row sits at y = 2. With selection initially
+        // pointing at a child, a click on the title row must reset it to 0.
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 2;
+        assert!(state.try_select_title_row(2));
+        assert_eq!(state.displayed_tree().selection, 0);
+    }
+
+    #[test]
+    fn try_select_title_row_non_title_y_is_noop() {
+        // Below body_top or above the title row — helper returns false and
+        // does not touch selection.
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 2;
+        // y inside body, not the title row.
+        assert!(!state.try_select_title_row(4));
+        assert_eq!(state.displayed_tree().selection, 2);
+        // y at body_top itself — also not the title row.
+        assert!(!state.try_select_title_row(3));
+        assert_eq!(state.displayed_tree().selection, 2);
+        // y above the title row (frame border rows) — also a no-op.
+        // body_top = 3 → title row sits at y = 2; y = 0 and y = 1 are
+        // strictly above and must not flip selection.
+        assert!(!state.try_select_title_row(0));
+        assert_eq!(state.displayed_tree().selection, 2);
+        assert!(!state.try_select_title_row(1));
+        assert_eq!(state.displayed_tree().selection, 2);
+    }
+
+    #[test]
+    fn try_select_title_row_no_op_when_body_top_zero() {
+        // Degenerate terminal: body_top = 0 → no title row exists,
+        // and the `body_top > 0` guard must prevent underflow.
+        let mut state = fake_browser_state_with_children(0, 4);
+        state.displayed_tree_mut().selection = 2;
+        assert!(!state.try_select_title_row(0));
+        // Selection unchanged.
+        assert_eq!(state.displayed_tree().selection, 2);
+    }
+
+    // Build a filtered tree mirroring the base tree (root + n children),
+    // so the displayed_tree() path goes through `filtered_tree`.
+    fn install_filtered_tree(state: &mut BrowserState, n: u32) {
+        let mut lines = vec![fake_root_line(None)];
+        for i in 1..=n {
+            lines.push(fake_child_line(i, &format!("fchild{i}")));
+        }
+        let filtered = Tree {
+            lines,
+            next_line_id: (n + 1) as TreeLineId,
+            selection: 0,
+            options: TreeOptions::default(),
+            scroll: 0,
+            total_search: false,
+            git_status: ComputationResult::None,
+            build_report: BuildReport::default(),
+        };
+        state.filtered_tree = Some(filtered);
+    }
+
+    #[test]
+    fn title_selected_reflects_filtered_tree_selection() {
+        // With a filtered tree installed, `displayed_tree()` resolves to
+        // the filtered one. `title_selected()` must therefore key off
+        // `filtered_tree.selection`, not `tree.selection`.
+        let mut state = fake_browser_state_with_children(3, 4);
+        install_filtered_tree(&mut state, 3);
+
+        // filtered selection = 0 → title selected
+        state.filtered_tree.as_mut().unwrap().selection = 0;
+        assert!(state.title_selected());
+
+        // filtered selection = 1 → title not selected, even though the
+        // base tree's selection is still 0.
+        state.filtered_tree.as_mut().unwrap().selection = 1;
+        assert_eq!(state.tree.selection, 0);
+        assert!(!state.title_selected());
+    }
+
+    #[test]
+    fn try_select_title_row_updates_filtered_tree_only() {
+        // With a filtered tree installed, the title click must update the
+        // filtered tree's selection, not the base tree's. Pins that
+        // `displayed_tree_mut()` is the seam the helper goes through.
+        let mut state = fake_browser_state_with_children(3, 4);
+        install_filtered_tree(&mut state, 3);
+        state.filtered_tree.as_mut().unwrap().selection = 2;
+        // Base tree starts at selection = 0; mark it explicitly so we
+        // can confirm it stays unchanged.
+        state.tree.selection = 0;
+
+        assert!(state.try_select_title_row(2));
+        assert_eq!(state.filtered_tree.as_ref().unwrap().selection, 0);
+        assert_eq!(
+            state.tree.selection, 0,
+            "base tree.selection must not be touched by title-row click",
+        );
+
+        // Now exercise the case where the base tree happened to have a
+        // different selection — title click should still only touch
+        // the filtered tree.
+        state.tree.selection = 7; // arbitrary non-zero
+        state.filtered_tree.as_mut().unwrap().selection = 3;
+        assert!(state.try_select_title_row(2));
+        assert_eq!(state.filtered_tree.as_ref().unwrap().selection, 0);
+        assert_eq!(state.tree.selection, 7);
+    }
+
+    #[test]
+    fn on_click_title_row_resets_selection_to_zero() {
+        // End-to-end: `on_click` at the title-row y should pin selection
+        // to 0. AppContext / Screen are not consulted by the title-row
+        // intercept (the args are underscored), so default values are
+        // fine.
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 2;
+        let con = AppContext::default();
+        let screen = Screen { width: 80, height: 24 };
+        let res = state.on_click(0, 2, screen, &con).expect("on_click ok");
+        assert!(matches!(res, CmdResult::Keep));
+        assert_eq!(state.displayed_tree().selection, 0);
+    }
+
+    #[test]
+    fn on_click_body_row_selects_first_child() {
+        // End-to-end: `on_click` at body_top should map to the first
+        // child line (lines[1]).
+        let mut state = fake_browser_state_with_children(3, 4);
+        state.displayed_tree_mut().selection = 0;
+        let con = AppContext::default();
+        let screen = Screen { width: 80, height: 24 };
+        let res = state.on_click(0, 3, screen, &con).expect("on_click ok");
+        assert!(matches!(res, CmdResult::Keep));
+        assert_eq!(
+            state.displayed_tree().selection,
+            1,
+            "click at body_top should select the first child",
+        );
     }
 }

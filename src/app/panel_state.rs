@@ -1161,6 +1161,36 @@ pub trait PanelState {
         default_frame_title_for_type(self.get_type()).to_string()
     }
 
+    /// Optional auxiliary info painted at the right end of the active
+    /// panel's status row (git summary, total size, mount-space widget).
+    ///
+    /// Returns `None` to leave the status row as message-only. Default
+    /// implementation returns `None`; `BrowserState` overrides to surface
+    /// the data that used to live on the (now-hidden) tree root row.
+    ///
+    /// Method named `status_aux` (no `get_` prefix) to match the sibling
+    /// `frame_title` / `tree_root` style.
+    fn status_aux(&self) -> Option<crate::display::StatusAux> {
+        None
+    }
+
+    /// True when the panel's frame title should render with the
+    /// body's selection background, signalling that the (hidden)
+    /// root row is the current selection. Default `false`; only
+    /// `BrowserState` overrides this.
+    ///
+    /// The returned bool is forwarded directly to `draw_frame_title`'s
+    /// `selected` arg. When `true`, the title is painted with the
+    /// `frame_title` compound style but with its background overlaid
+    /// from `selected_line.bg`, producing the same selection highlight
+    /// the body would have drawn on the (now hidden) root row.
+    ///
+    /// Method named `title_selected` (no `is_` prefix) to match the
+    /// sibling `frame_title` / `status_aux` / `tree_root` style.
+    fn title_selected(&self) -> bool {
+        false
+    }
+
     fn watchable_paths(&self) -> Vec<PathBuf> {
         vec![]
     }
@@ -1375,24 +1405,10 @@ pub fn get_arg<T: Copy + FromStr>(
 mod frame_title_tests {
     use super::*;
 
-    #[test]
-    fn default_frame_title_per_type_is_non_empty() {
-        for ty in [
-            PanelStateType::Help,
-            PanelStateType::Preview,
-            PanelStateType::Stage,
-            PanelStateType::Trash,
-            PanelStateType::Fs,
-            PanelStateType::Tree,
-        ] {
-            let label = default_frame_title_for_type(ty);
-            assert!(
-                !label.is_empty(),
-                "default frame title for {:?} must not be empty",
-                ty
-            );
-        }
-    }
+    // `default_frame_title_specific_values` below subsumes the
+    // non-empty check (each `assert_eq!` against a literal proves the
+    // value is non-empty), so a separate `is_non_empty` test would be
+    // dead.
 
     #[test]
     fn default_frame_title_specific_values() {
