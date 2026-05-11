@@ -36,7 +36,7 @@ test in `frame.rs` will keep passing because it only checks glyph bytes.
 
 ## Overlay routing — single field, single render hook, single key hook
 
-`App::overlay: Option<Overlay>` (`src/app/app.rs:77`) is the only
+`App::overlay: Option<Overlay>` (`src/app/app.rs:81`) is the only
 floating-modal state. Do not introduce a parallel flag or a stack —
 the variants of `Overlay` (`src/app/overlay/mod.rs:127-137`,
 currently `Confirm`, `Goto`, `Add`, plus a test-only `Stub`) cover
@@ -44,20 +44,23 @@ every floating-modal need we have, and the rest of the routing
 assumes "at most one".
 
 Render hook: `display_panels` post-passes the overlay after every panel
-has been drawn (`src/app/app.rs:784` and `:794` pass
+has been drawn (`src/app/app.rs:983` and `:993` pass
 `self.overlay.as_ref()` down). Key/mouse hook: when `overlay.is_some()`,
 the event loop dispatches to `overlay.handle_key` /
 `overlay.handle_mouse` before `Panel::apply_command` ever sees the
-event (`src/app/app.rs:825-842`).
+event (`src/app/app.rs:1028-1049`).
 
 The four `OverlayOutcome` variants decide what happens after the
-handler runs (`src/app/app.rs:672-704`):
+handler runs (`src/app/app.rs:867-898`):
 
 - `Stay` — event consumed, overlay remains.
-- `Close` — overlay dropped.
+- `Close` — overlay dropped. The Close arm also clears
+  `App::pending_bulk_rename` so a cancelled bulk-rename confirm doesn't
+  leave a stale plan that a later direct `:bulk_rename_apply` could
+  pick up.
 - `CloseAndRun(cmd)` — overlay dropped, `App::skip_confirm = true`,
   then `cmd` re-enters `apply_command`. The `skip_confirm` flag
-  (`src/app/app.rs:83`, cleared at `:191`) is the loop-avoidance
+  (`src/app/app.rs:87`, cleared at `:205`) is the loop-avoidance
   signal — without it the destructive verb would re-open the same
   overlay. Cleared unconditionally on every dispatch.
   `App::pending_bulk_rename: Option<RenameRun>` is the sibling
@@ -72,7 +75,33 @@ Adding a new overlay variant means editing three places only: the
 `Overlay` enum, and each of the three dispatch shims (`render`,
 `handle_key`, `handle_mouse`). There is no extra plumbing — no event
 filter, no panel callback, no `CmdResult` variant beyond the existing
-`OpenOverlay` (`src/app/app.rs:467`).
+`OpenOverlay` (`src/app/app.rs:515`).
+
+### Add modal — `Internal::add` / `AddOverlay`
+
+`Internal::add` is the create-file-or-directory entry point. It is
+**browser-only** by design: the handler lives in
+`BrowserState::on_internal` (`src/browser/browser_state.rs:803`); for
+every other panel type the wildcard arm in `on_internal_generic`
+returns `CmdResult::Keep` so the keypress is silently consumed.
+
+The target directory for the modal is chosen by
+`resolve_add_target_dir` (`src/browser/browser_state.rs:59`): if the
+current selection is a directory, create inside it; otherwise create
+alongside the selection (i.e. its parent). The bound key is `alt-n`
+(`src/verb/verb_store.rs:292`).
+
+`AddOverlay::try_commit` returns `OverlayOutcome::CloseAndFocus(full)`
+on success — the App synthesizes a `:focus <full>` invocation so the
+just-created entry becomes selected and the tree scrolls to it. The
+overlay also bails out as a no-op render when
+`area.width < 8 || area.height < 5` (`src/app/overlay/add.rs:226`) so
+pathologically small terminals don't draw a half-frame.
+
+`maybe_bulk_stage_confirm` skips `Internal::add` (alongside the
+bulk-rename internals) so pressing `alt-n` while the stage panel is
+active with 2+ staged paths opens the Add modal directly rather than
+a spurious "Run :add on N files?" prompt.
 
 ### Bulk rename — App-level intercept and `pending_bulk_rename` payload
 
@@ -152,37 +181,43 @@ they must opt in via `confirm: true` in their `conf.hjson`. The unit
 test at `src/verb/verb_store.rs:756-781` pins this behaviour.
 
 The intercept lives in `App::apply_command` and runs three checks in
-order (`src/app/app.rs:157-190`). At most one overlay opens per
+order (`src/app/app.rs:185-205`). At most one overlay opens per
 dispatch; the first match wins:
 
 1. Bulk staging — `App::maybe_bulk_stage_confirm`
-   (`src/app/app.rs:621`). Fires only when the stage panel is the
+   (`src/app/app.rs:669`). Fires only when the stage panel is the
    active panel and `app_state.stage.len() >= 2`. Skips two classes of
    internals via `is_stage_management_internal`
-   (`src/app/app.rs:1083`). First, the stage-management internals
+   (`src/app/app.rs:1310`). First, the stage-management internals
    (`Internal::stage`, `unstage`, `toggle_stage`, `clear_stage`,
-   `stage_all_directories`, `stage_all_files`, `*_staging_area`) —
-   they operate on the stage itself, not on its contents. Second,
-   the pure navigation internals (`line_up`, `line_down`,
-   `line_up_no_cycle`, `line_down_no_cycle`, `page_up`, `page_down`,
-   `select_first`, `select_last`) — pressing j/k/PgUp/PgDn moves the
-   cursor inside the stage panel, it doesn't fan out across staged
-   paths, so a "Run :line_down on N files?" prompt would be nonsensical.
-   Both classes share one bypass function because the call site only
-   needs a yes/no decision; the dual purpose is documented at the
-   `matches!` arm. `select_first` / `select_last` are added defensively
-   — navigation-shaped, even though `stage_state.rs` does not dispatch
-   them today.
+   `stage_all_directories`, `stage_all_files`, `open_staging_area`,
+   `close_staging_area`, `toggle_staging_area`,
+   `focus_staging_area_no_open`) — they operate on the stage itself,
+   not on its contents. Second, the pure navigation internals
+   (`line_up`, `line_down`, `line_up_no_cycle`, `line_down_no_cycle`,
+   `page_up`, `page_down`, `select_first`, `select_last`) — pressing
+   j/k/PgUp/PgDn moves the cursor inside the stage panel, it doesn't
+   fan out across staged paths, so a "Run :line_down on N files?"
+   prompt would be nonsensical. Both classes share one bypass function
+   because the call site only needs a yes/no decision; the dual
+   purpose is documented at the `matches!` arm. `select_first` /
+   `select_last` are added defensively — navigation-shaped, even
+   though `stage_state.rs` does not dispatch them today. A third set
+   of internals is bypassed inline at the call site (not through
+   `is_stage_management_internal`): `Internal::bulk_rename`,
+   `Internal::bulk_rename_apply`, and `Internal::add` — these open
+   their own dedicated modals and must not surface the generic
+   "Run :<verb> on N files?" confirm.
 2. Overwrite check — resolved destination of `:cp`/`:mv` already
    `exists()`.
 3. Per-verb `requires_confirm` (and the `Internal::trash` shape, which
    is recognised from the resolved `Verb`, not from any per-internal
-   flag — `src/app/app.rs:556`, `:581`, `:602`).
+   flag — `src/app/app.rs:604`, `:629`, `:650`).
 
 `skip_confirm` and an already-open overlay both bypass the intercept
-(`src/app/app.rs:171`). The bookkeeping is symmetric: a re-dispatched
+(`src/app/app.rs:185`). The bookkeeping is symmetric: a re-dispatched
 command from `CloseAndRun` clears its bypass on the way through
-(`:191`), so a verb that itself opens a new overlay (none exist today,
+(`:205`), so a verb that itself opens a new overlay (none exist today,
 but the door is open) still gets the next round of checks.
 
 ## Bookmarks config plumbing
@@ -335,8 +370,8 @@ The three pieces of aux info that used to decorate the root row (git
 status summary, total size when `show_sizes`, mount-space bar when
 `show_root_fs`) now live at the right end of the wide status row.
 The data flows through `PanelState::status_aux` (trait default
-`None` at `src/app/panel_state.rs:1170`; only `BrowserState` overrides
-at `src/browser/browser_state.rs:866-883`). The carrier type
+`None` at `src/app/panel_state.rs:1173`; only `BrowserState` overrides
+at `src/browser/browser_state.rs:973`). The carrier type
 `StatusAux` lives at `src/display/status_aux.rs`. Paint geometry lives
 in `src/display/status_line.rs:37-101`: aux is suppressed when
 `status.error == true` (errors win the row), when the row is too
@@ -358,7 +393,7 @@ The frame title is the visual carrier for the (still-hidden) tree
 root row's selection state. `PanelState::title_selected()` is the
 trait hook (default `false` at `src/app/panel_state.rs:1190`); only
 `BrowserState` overrides it, returning `displayed_tree().selection == 0`
-(`src/browser/browser_state.rs:956`). Future tree-like panels can opt in
+(`src/browser/browser_state.rs:991`). Future tree-like panels can opt in
 by overriding — every other panel type (Preview, Stage, Trash, Help,
 Fs) keeps the default and its title never highlights.
 
@@ -398,8 +433,8 @@ deliberately not width-gated: a click on that edge still selects the
 root, matching the "top edge is the root's seat" intent. Those panels
 are pathological at that width anyway.
 
-Three production call sites pass the `selected` arg: the panel render
+Four production call sites pass the `selected` arg: the panel render
 in `src/app/app_panels.rs:712` forwards `panel.state().title_selected()`;
-the two overlay renderers (`src/app/overlay/goto.rs:195`,
-`src/app/overlay/confirm.rs:185`) always pass `false` — overlays have
-no selectable root.
+the three overlay renderers (`src/app/overlay/goto.rs:195`,
+`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:247`) always
+pass `false` — overlays have no selectable root.
