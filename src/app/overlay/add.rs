@@ -159,6 +159,19 @@ impl AddOverlay {
         let trimmed = self.input.trim_end_matches('/');
         let full = self.target_dir.join(trimmed);
 
+        // Refuse to clobber an existing entry. `fs::File::create` would
+        // silently truncate any existing file at `full`, and
+        // `create_dir_all` is a no-op on an existing directory. Neither
+        // is what a user typing a name into a "new file" modal would
+        // expect; surface it as an inline error and let them pick a
+        // different name. This is also consistent with the codebase's
+        // safety model — destructive operations require a confirm
+        // overlay, and silent overwrite would bypass that policy.
+        if full.exists() {
+            self.error = Some("file or directory already exists".to_string());
+            return OverlayOutcome::Stay;
+        }
+
         let result: io::Result<()> = if make_dir {
             fs::create_dir_all(&full)
         } else {
@@ -1012,25 +1025,47 @@ mod tests {
     }
 
     #[test]
-    fn commit_existing_file_is_overwritten() {
-        // Pin: current behaviour is `fs::File::create` (truncates an
-        // existing file). If we ever want a "refuse to overwrite" policy
-        // it must be an explicit change with a corresponding update to
-        // this test — silent overwrites in a `:add` modal are a footgun.
+    fn commit_existing_file_rejected_with_error() {
+        // Pin: if the target already exists, the modal refuses to
+        // clobber it. The user gets an inline error and a chance to
+        // pick a different name. Silent overwrite would bypass the
+        // codebase's "destructive ops need a confirm overlay" policy.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("existing.txt");
-        std::fs::write(&path, b"original contents that should be wiped").unwrap();
+        let original = b"original contents that must be preserved";
+        std::fs::write(&path, original).unwrap();
         let mut o = AddOverlay::new(tmp.path().to_path_buf());
         o.input = "existing.txt".to_string();
         o.cursor = o.input.len();
         let r = o.handle_key(key!(enter));
-        match r {
-            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, path),
-            other => panic!("expected CloseAndFocus, got {other:?}"),
-        }
-        // The file exists but its content was truncated by `File::create`.
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(
+            o.error.as_deref(),
+            Some("file or directory already exists"),
+        );
+        // Existing file contents must be untouched.
         let after = std::fs::read(&path).unwrap();
-        assert!(after.is_empty(), "existing file must be truncated, got {after:?}");
+        assert_eq!(after, original, "existing file must not be overwritten");
+    }
+
+    #[test]
+    fn commit_existing_directory_rejected_with_error() {
+        // Same policy for an existing directory: `mkdir foo/` on a
+        // present `foo` would otherwise be a silent no-op that the
+        // user reads as success.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("existing_dir");
+        std::fs::create_dir(&path).unwrap();
+        let mut o = AddOverlay::new(tmp.path().to_path_buf());
+        o.input = "existing_dir/".to_string();
+        o.cursor = o.input.len();
+        let r = o.handle_key(key!(enter));
+        assert!(matches!(r, OverlayOutcome::Stay));
+        assert_eq!(
+            o.error.as_deref(),
+            Some("file or directory already exists"),
+        );
+        assert!(path.is_dir(), "existing directory must remain on disk");
     }
 
     #[test]
