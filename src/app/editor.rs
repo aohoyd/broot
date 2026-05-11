@@ -132,9 +132,14 @@ fn resolve_editor_from_env(
     visual: Option<String>,
     editor: Option<String>,
 ) -> io::Result<String> {
+    // Filter EACH variable independently before chaining so a
+    // whitespace-only $VISUAL doesn't short-circuit `or` and mask a
+    // valid $EDITOR. `Some("   ").or(Some("vim"))` returns `Some("   ")`
+    // because `or` keeps the first Some — so a single trailing
+    // `.filter()` after the chain would drop the whole thing.
     visual
-        .or(editor)
         .filter(|s| !s.trim().is_empty())
+        .or_else(|| editor.filter(|s| !s.trim().is_empty()))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -173,16 +178,25 @@ mod test_support {
     /// `None`          => no override; resolver falls through to env vars.
     static OVERRIDE: Mutex<Option<Option<String>>> = Mutex::new(None);
 
+    /// Lock the override mutex even when it's been poisoned by a panic
+    /// in a previous test. A poisoned lock is recoverable here — the
+    /// guarded value is a simple `Option`, not a half-mutated invariant
+    /// — and cascading "previous test panicked" failures hide the real
+    /// failure.
+    fn lock_override() -> std::sync::MutexGuard<'static, Option<Option<String>>> {
+        OVERRIDE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub(super) fn current_override() -> Option<Option<String>> {
-        OVERRIDE.lock().unwrap().clone()
+        lock_override().clone()
     }
 
     pub(crate) fn set_override(value: Option<String>) {
-        *OVERRIDE.lock().unwrap() = Some(value);
+        *lock_override() = Some(value);
     }
 
     pub(crate) fn clear_override() {
-        *OVERRIDE.lock().unwrap() = None;
+        *lock_override() = None;
     }
 }
 
@@ -196,9 +210,29 @@ mod tests {
     // Tests share the editor override; serialize them so they can't race.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Acquire `TEST_LOCK` even if a previous test panicked while holding
+    /// it. The guarded value is `()` so a poisoned mutex carries no
+    /// damaged state — recovering avoids spurious cascade failures
+    /// where every subsequent test panics on `unwrap()` of `Err(PoisonError)`.
+    fn lock_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// RAII guard that clears the editor override on drop, including on
+    /// panic-unwind paths. Without this, an assertion failure between
+    /// `set_override` and `clear_override` leaves the shared `OVERRIDE`
+    /// dirty for the next test (and the symptom is a hard-to-trace
+    /// cross-test contamination).
+    struct OverrideGuard;
+    impl Drop for OverrideGuard {
+        fn drop(&mut self) {
+            test_support::clear_override();
+        }
+    }
+
     #[test]
     fn edit_in_external_with_noop_editor_round_trips_content() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_test();
         // A no-op editor (exits 0, writes nothing) leaves the temp file
         // unchanged, so the returned String must equal the original.
         // `true` lives at `/bin/true` on Linux and `/usr/bin/true` on
@@ -208,21 +242,21 @@ mod tests {
             .find(|p| std::path::Path::new(p).exists())
             .expect("no `true` binary found on this system");
         test_support::set_override(Some((*true_path).to_string()));
-        let result = edit_in_external("hello", ".test");
-        test_support::clear_override();
-        let out = result.expect("editor helper should succeed with the no-op editor");
+        let _override = OverrideGuard;
+        let out = edit_in_external("hello", ".test")
+            .expect("editor helper should succeed with the no-op editor");
         assert_eq!(out, "hello");
     }
 
     #[test]
     fn edit_in_external_returns_documented_err_when_editor_unset() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_test();
         // Force-unset via override so we don't depend on the process env
         // (the test harness may have $EDITOR set in CI).
         test_support::set_override(None);
-        let result = edit_in_external("hello", ".test");
-        test_support::clear_override();
-        let err = result.expect_err("expected Err when editor is unset");
+        let _override = OverrideGuard;
+        let err = edit_in_external("hello", ".test")
+            .expect_err("expected Err when editor is unset");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert_eq!(err.to_string(), "set $EDITOR to enable this feature");
     }
@@ -245,6 +279,21 @@ mod tests {
     fn resolve_falls_back_to_editor_when_visual_unset() {
         let r = resolve_editor_from_env(None, Some("nano".to_string()));
         assert_eq!(r.expect("EDITOR must be returned"), "nano");
+    }
+
+    #[test]
+    fn resolve_whitespace_visual_falls_back_to_editor() {
+        // Regression pin: `Some("   ").or(Some("vim"))` returns
+        // `Some("   ")` because `or` keeps the first Some. A single
+        // trailing `.filter(non_blank)` would then drop the chain
+        // entirely and return Err — silently dropping a perfectly valid
+        // $EDITOR. We must filter each variable independently before
+        // chaining so $VISUAL='   ' falls through to $EDITOR='vim'.
+        let r = resolve_editor_from_env(
+            Some("   ".to_string()),
+            Some("vim".to_string()),
+        );
+        assert_eq!(r.expect("EDITOR must be returned when VISUAL is blank"), "vim");
     }
 
     #[test]
@@ -272,7 +321,7 @@ mod tests {
 
     #[test]
     fn edit_in_external_non_zero_exit_returns_error() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_test();
         // `false` exits with status 1 unconditionally. The helper must
         // map that into an io::Error rather than silently returning the
         // (untouched) temp-file content.
@@ -281,9 +330,9 @@ mod tests {
             .find(|p| std::path::Path::new(p).exists())
             .expect("no `false` binary found on this system");
         test_support::set_override(Some((*false_path).to_string()));
-        let result = edit_in_external("hello", ".test");
-        test_support::clear_override();
-        let err = result.expect_err("non-zero exit must surface as Err");
+        let _override = OverrideGuard;
+        let err = edit_in_external("hello", ".test")
+            .expect_err("non-zero exit must surface as Err");
         assert!(
             err.to_string().contains("editor exited with"),
             "error message must explain the failure: {err}",
