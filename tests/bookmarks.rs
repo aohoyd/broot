@@ -1,16 +1,14 @@
-//! Integration tests for the `:goto_bookmarks` verb wiring (Task 13).
+//! Integration tests for the `:bookmarks` verb wiring.
 //!
 //! These tests focus on the public surface:
-//! - the verb registry registers `Internal::goto_bookmarks` with key `g`,
+//! - the verb registry registers `Internal::bookmarks` with key `alt-b`,
 //! - building the `GotoOverlay` from a list of `BookmarkEntry` produces
 //!   the expected `Overlay::Goto` variant carrying the entries,
-//! - the overlay's single-character match returns the bookmarked path
-//!   (this also doubles as a sanity check for Task 12's behaviour from
-//!   the integration layer).
+//! - the overlay's single-character match returns the bookmarked path.
 //!
 //! The full `App::apply_command` end-to-end pipeline is gapped by the
 //! same headless-event-loop limitation noted in `confirm_destructive.rs`
-//! and is verified manually per the plan's "Post-Completion" section.
+//! and is verified manually.
 
 use {
     broot::{
@@ -38,35 +36,35 @@ use {
 // Verb registry shape
 // =============================================================================
 
-/// `Internal::goto_bookmarks` must be registered with key `g` in the
+/// `Internal::bookmarks` must be registered with key `alt-b` in the
 /// built-in verb store.
 #[test]
-fn goto_bookmarks_internal_is_registered_with_g_key() {
+fn bookmarks_internal_is_registered_with_alt_b_key() {
     let mut conf = Conf::default();
     let store = VerbStore::new(&mut conf).unwrap();
     let verb = store
         .verbs()
         .iter()
-        .find(|v| v.get_internal() == Some(Internal::goto_bookmarks))
-        .expect(":goto_bookmarks must be registered as a built-in internal");
-    let g_key: KeyCombination = key!('g');
+        .find(|v| v.get_internal() == Some(Internal::bookmarks))
+        .expect(":bookmarks must be registered as a built-in internal");
+    let expected: KeyCombination = key!(alt - b);
     assert!(
-        verb.keys.contains(&g_key),
-        "expected :goto_bookmarks to be bound to 'g', got keys = {:?}",
+        verb.keys.contains(&expected),
+        "expected :bookmarks to be bound to alt-b, got keys = {:?}",
         verb.keys,
     );
 }
 
 /// The `key_desc_of_internal` helper exposed for status lines must
-/// resolve `goto_bookmarks` to the `g` keystroke.
+/// resolve `bookmarks` to the alt-b keystroke description.
 #[test]
-fn key_desc_of_goto_bookmarks_is_g() {
+fn key_desc_of_bookmarks_is_alt_b() {
     let mut conf = Conf::default();
     let store = VerbStore::new(&mut conf).unwrap();
     let desc = store
-        .key_desc_of_internal(Internal::goto_bookmarks)
-        .expect("goto_bookmarks should have a key description");
-    assert_eq!(desc, "g");
+        .key_desc_of_internal(Internal::bookmarks)
+        .expect("bookmarks should have a key description");
+    assert_eq!(desc, "alt-b");
 }
 
 // =============================================================================
@@ -94,11 +92,11 @@ fn sample_entries() -> Vec<BookmarkEntry> {
     ]
 }
 
-/// Building the overlay from `Internal::goto_bookmarks` yields an
+/// Building the overlay from `Internal::bookmarks` yields an
 /// `Overlay::Goto` variant; pressing the bookmark key reaches the
 /// expected entry. We deliberately do not pin the struct fields here —
-/// see `tests/goto_bookmarks.rs::overlay_h_key_returns_close_and_focus_with_home`
-/// below for the behavioural surface.
+/// the behavioural surface is covered by
+/// `overlay_h_key_returns_close_and_focus_with_home` below.
 #[test]
 fn overlay_goto_constructor_carries_bookmarks() {
     let entries = sample_entries();
@@ -114,8 +112,8 @@ fn overlay_goto_constructor_carries_bookmarks() {
 }
 
 /// Pressing the bookmark key inside the overlay closes it with
-/// `CloseAndFocus(<path>)`, the path the App routes through a synthesized
-/// `:focus` command (Task 6).
+/// `CloseAndFocus(<path>)`, which the App routes through a synthesized
+/// `:focus` command.
 #[test]
 fn overlay_h_key_returns_close_and_focus_with_home() {
     let mut overlay = GotoOverlay::new(sample_entries());

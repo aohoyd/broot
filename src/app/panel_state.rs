@@ -632,10 +632,7 @@ pub trait PanelState {
                 }
             }
             Internal::escape => CmdResult::HandleInApp(Internal::escape),
-            Internal::goto_bookmarks => {
-                // Open the Goto / Bookmarks overlay populated from the
-                // resolved `AppContext::bookmarks` list. The overlay
-                // takes its own copy so it can outlive the dispatch.
+            Internal::bookmarks => {
                 let overlay = Overlay::Goto(GotoOverlay::new(cc.app.con.bookmarks.clone()));
                 CmdResult::OpenOverlay(Box::new(overlay))
             }

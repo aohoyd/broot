@@ -1838,7 +1838,7 @@ mod confirm_helper_tests {
         // page_up, select_first), display toggles (toggle_hidden,
         // sort_by_size, set_panel_width, default_layout), input-row
         // edits (input_clear, input_go_word_left), search/bookmarks
-        // (total_search, goto_bookmarks), stage management itself
+        // (total_search, bookmarks), stage management itself
         // (stage, unstage, clear_stage, focus_staging_area_no_open),
         // and the carve-outs that used to live at the call site
         // (bulk_rename, bulk_rename_apply, add, focus). None of these
@@ -1864,7 +1864,7 @@ mod confirm_helper_tests {
             Internal::input_clear,
             Internal::input_go_word_left,
             Internal::total_search,
-            Internal::goto_bookmarks,
+            Internal::bookmarks,
             Internal::stage,
             Internal::unstage,
             Internal::clear_stage,

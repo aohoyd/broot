@@ -124,30 +124,17 @@ With two or more paths staged, press <kbd>F2</kbd> to open them in
 the editor, then confirm the diff to apply. With zero or one staged
 path, <kbd>F2</kbd> opens the existing inline rename prompt.
 
-## Goto bookmarks
+## Bookmarks
 
-Press <kbd>g</kbd> from the tree to open the bookmarks goto modal.
-Each entry is a single-character shortcut bound to a path; hit the
-key and broot jumps there. The built-in defaults are `h` (home),
+Press <kbd>alt</kbd><kbd>b</kbd> from the tree to open the bookmarks
+modal. Each entry is a single-character shortcut bound to a path; hit
+the key and broot jumps there. The built-in defaults are `h` (home),
 `d` (`~/Downloads`), `c` (`$XDG_CONFIG_HOME` or `~/.config`), and
 `t` (trash).
 
-The bookmark keys are scoped *inside* the modal. They do not collide
-with global tree-mode keys: typing `g` while the modal is open does
-nothing, and a single-char jump (e.g. `h` while the modal is open
-focuses Home, but `h` from the tree still triggers `:parent`).
-
-Inside the *tree*, `g` is the trigger key for `:goto_bookmarks`.
-Because `g` is also a regular fuzzy-match character, broot installs
-this binding on the **internal verb** `:goto_bookmarks`, not on the
-input row — so typing `g` as part of a search filter while the input
-has focus still works. If you want to free `g` for a different
-shortcut, add an entry that binds the key to nothing (no execution
-fields — neither `internal` nor `external`) in your `conf.hjson`:
-
-```hjson
-{ key: g }
-```
+The single-char bookmark keys are scoped *inside* the modal — a
+single-char jump (e.g. `h` while the modal is open focuses Home,
+but `h` from the tree still triggers `:parent`).
 
 Customize the bookmark list with a `bookmarks` block in `conf.hjson`
 — see the commented example near the top of the default config.
