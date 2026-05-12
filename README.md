@@ -121,8 +121,11 @@ first.
 
 With two or more paths staged, press <kbd>F2</kbd> to open them in
 `$EDITOR` for bulk rename. Edit the destination names, save and quit
-the editor, then confirm the diff to apply. With zero or one staged
-path, <kbd>F2</kbd> opens the existing inline rename prompt.
+the editor, then confirm the diff to apply. The confirm modal shows
+a compact diff (basenames only for same-parent renames, full paths
+for cross-directory moves); long path pairs soft-wrap and the modal
+grows to fit. With zero or one staged path, <kbd>F2</kbd> opens the
+existing inline rename prompt.
 
 ## Bookmarks
 

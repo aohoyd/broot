@@ -61,6 +61,7 @@ use {
         Area,
         CompoundStyle,
     },
+    unicode_width::UnicodeWidthStr,
 };
 
 /// Which button currently has keyboard focus.
@@ -152,8 +153,51 @@ impl OverlayState for ConfirmOverlay {
         palette: &StyleMap,
     ) -> io::Result<()> {
         // ---- geometry ---------------------------------------------------
-        let want_h: u16 = (self.body.len() as u16).saturating_add(5).min(15);
-        let area = frame::centered_rect(screen, 50, want_h);
+        //
+        // Order:
+        //   1. compute want_w from body line widths, title width, and
+        //      button row width (each + 4-cell horizontal padding);
+        //   2. derive inner_width from want_w (post-cap);
+        //   3. soft-wrap the body using inner_width — rendered.len() may
+        //      exceed self.body.len();
+        //   4. derive want_h from the POST-WRAP rendered count so the
+        //      modal grows to fit wrapped lines.
+        let cancel_text = " [ Cancel ] ";
+        let confirm_text = format!(" [ {} ] ", self.confirm_label);
+
+        let max_w = (screen.width as u32 * 8 / 10) as u16;
+        let saturating_to_u16 = |n: usize| -> u16 { n.min(u16::MAX as usize) as u16 };
+        let content_w = saturating_to_u16(
+            self.body
+                .iter()
+                .map(|l| UnicodeWidthStr::width(l.as_str()))
+                .max()
+                .unwrap_or(0),
+        )
+        .saturating_add(4);
+        let title_w = saturating_to_u16(UnicodeWidthStr::width(self.title.as_str()))
+            .saturating_add(4);
+        let buttons_w = saturating_to_u16(
+            UnicodeWidthStr::width(cancel_text) + UnicodeWidthStr::width(confirm_text.as_str()),
+        )
+        .saturating_add(4);
+        let want_w = content_w.max(title_w).max(buttons_w).max(40).min(max_w);
+
+        // Post-wrap row count drives want_h. We need a provisional area
+        // width to compute inner_width — centered_rect clamps to screen
+        // width, so use min(want_w, screen.width).
+        let provisional_w = want_w.min(screen.width);
+        let inner_width = provisional_w.saturating_sub(4) as usize;
+        let rendered: Vec<String> = self
+            .body
+            .iter()
+            .flat_map(|l| wrap_diff_line(l, inner_width))
+            .collect();
+        let want_h: u16 = saturating_to_u16(rendered.len())
+            .saturating_add(5)
+            .min(15);
+
+        let area = frame::centered_rect(screen, want_w, want_h);
         if area.width < 8 || area.height < 5 {
             // Too small to draw anything sensible — bail. This avoids
             // a corrupted modal on tiny terminals.
@@ -178,15 +222,16 @@ impl OverlayState for ConfirmOverlay {
         frame::draw_frame_title(w, area.clone(), palette, &self.title, false)?;
 
         // ---- body -------------------------------------------------------
+        // `rendered` and `inner_width` were computed in the geometry block
+        // above (we need rendered.len() to size want_h). Re-use them here.
         let visible = Self::visible_body_rows(area.clone());
-        let max_scroll = Self::max_scroll(self.body.len(), visible);
+        let max_scroll = Self::max_scroll(rendered.len(), visible);
         let scroll = self.scroll.min(max_scroll) as usize;
         let body_top = area.top + 1;
         let inner_left = area.left + 2;
-        let inner_width = area.width.saturating_sub(4) as usize;
         let body_style = &palette.default;
 
-        let total = self.body.len();
+        let total = rendered.len();
         let visible_usize = visible as usize;
         let last_visible_idx = scroll + visible_usize;
         let overflow = total > last_visible_idx;
@@ -197,9 +242,12 @@ impl OverlayState for ConfirmOverlay {
                 break;
             }
             w.queue(cursor::MoveTo(inner_left, body_top + row))?;
-            let line = &self.body[body_idx];
-            // Truncate the line to the available width; if this is the
-            // last visible row and there is more body, append `…`.
+            let line = &rendered[body_idx];
+            // Truncate the line to the available width. Append `…` only
+            // when ALL THREE hold: rendered count overflows the visible
+            // window (`overflow`), this is the last paintable row in the
+            // window (`is_last_visible`), AND there is still un-rendered
+            // body after this row (`body_idx + 1 < total`).
             let is_last_visible = row + 1 == visible || body_idx + 1 == total;
             let display = if overflow && is_last_visible && body_idx + 1 < total {
                 truncate_with_ellipsis(line, inner_width.saturating_sub(2))
@@ -211,12 +259,11 @@ impl OverlayState for ConfirmOverlay {
 
         // ---- button row -------------------------------------------------
         // Row sits at area.top + area.height - 2 (one above the bottom
-        // border).
+        // border). `cancel_text` and `confirm_text` were already bound in
+        // the geometry block above and are reused for both measurement
+        // and paint.
         let button_row_y = area.top + area.height - 2;
         let half = area.width / 2;
-
-        let cancel_text = " [ Cancel ] ";
-        let confirm_text = format!(" [ {} ] ", self.confirm_label);
 
         // Layout the two buttons left/right of the centre line.
         // Cancel sits in the left half, confirm in the right half.
@@ -303,11 +350,18 @@ impl OverlayState for ConfirmOverlay {
             };
         }
 
-        // Body scroll. We don't know the visible-row count without a
-        // render area, so we clamp against the body length itself —
-        // `render` re-clamps to the actual visible window.
+        // Body scroll. We don't know the visible-row count or the
+        // post-wrap rendered-row count without a render area, so we
+        // clamp against an upper bound (`body.len() * 2`, since
+        // `wrap_diff_line` produces at most 2 rows per input). `render`
+        // re-clamps precisely against `rendered.len()`.
         if key == key!(down) {
-            let max = self.body.len().saturating_sub(1) as u16;
+            let max = self
+                .body
+                .len()
+                .saturating_mul(2)
+                .saturating_sub(1)
+                .min(u16::MAX as usize) as u16;
             if self.scroll < max {
                 self.scroll += 1;
             }
@@ -358,6 +412,35 @@ fn truncate_with_ellipsis(
     format!("{body} …")
 }
 
+/// Soft-wrap a `from → to` diff line that overflows `inner_width`.
+/// Indent details documented in CLAUDE.md.
+fn wrap_diff_line(line: &str, inner_width: usize) -> Vec<String> {
+    if UnicodeWidthStr::width(line) <= inner_width {
+        return vec![line.to_string()];
+    }
+    let Some(byte_idx) = line.find(" → ") else {
+        return vec![line.to_string()];
+    };
+    let (from_part, rest) = line.split_at(byte_idx);
+    // `rest` begins with " → "; strip the leading space to land "→ to".
+    let to_part = rest.trim_start();
+    // Continuation indent aligns the new `→` one column to the right of
+    // the original arrow (`from_width + 1` — under the space, NOT
+    // directly under the arrow). Capped at 10 cols to limit wasted
+    // left margin. Collapses to 0 when the indented continuation would
+    // itself overflow `inner_width` — visibility of the new path beats
+    // column alignment.
+    let preferred_indent = (UnicodeWidthStr::width(from_part) + 1).min(10);
+    let to_width = UnicodeWidthStr::width(to_part);
+    let indent_len = if preferred_indent + to_width <= inner_width {
+        preferred_indent
+    } else {
+        0
+    };
+    let indent = " ".repeat(indent_len);
+    vec![from_part.to_string(), format!("{indent}{to_part}")]
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -396,6 +479,13 @@ mod tests {
             row: y,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn render_capture(o: &ConfirmOverlay, screen: Area) -> String {
+        let palette = StyleMap::no_term();
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
+        o.render(&mut wbuf, screen, &palette).unwrap();
+        String::from_utf8_lossy(wbuf.buffer()).into_owned()
     }
 
     // ---- key dispatch ---------------------------------------------------
@@ -541,12 +631,14 @@ mod tests {
 
     #[test]
     fn down_clamps_at_body_end() {
-        // body has 3 rows; body.len() - 1 = 2; scroll cannot exceed 2.
+        // Body has 3 rows. `handle_key(down)` clamps against the
+        // upper bound `body.len() * 2 - 1` = 5 (room for wrap), since
+        // it has no render-area info. `render` re-clamps precisely.
         let mut o = make(vec!["a", "b", "c"], false);
         for _ in 0..10 {
             let _ = o.handle_key(key!(down));
         }
-        assert!(o.scroll <= 2, "scroll {} exceeded clamp", o.scroll);
+        assert!(o.scroll <= 5, "scroll {} exceeded upper-bound clamp", o.scroll);
     }
 
     #[test]
@@ -705,6 +797,262 @@ mod tests {
         // Should not panic, should populate hits.
         o.render(&mut wbuf, screen, &palette).unwrap();
         assert!(o.button_hits.get_cloned().is_some());
+    }
+
+    // ---- wrap_diff_line -------------------------------------------------
+
+    #[test]
+    fn wrap_diff_line_fits_returns_single() {
+        let out = wrap_diff_line("a → b", 40);
+        assert_eq!(out, vec!["a → b".to_string()]);
+    }
+
+    #[test]
+    fn wrap_diff_line_splits_on_first_arrow() {
+        // "long-from → long-to" — total 19 chars, inner_width 15 forces
+        // wrap. Continuation "{10 spaces}→ long-to" = 19 chars > 15, so
+        // adaptive indent collapses to 0 → "→ long-to". To exercise the
+        // PREFERRED 10-col indent path, use a wider inner_width where the
+        // indent still fits.
+        let out = wrap_diff_line("long-from → long-to", 15);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "long-from");
+        // 10-col indent (10) + "→ long-to" (9) = 19 > 15 → indent collapses.
+        assert_eq!(out[1], "→ long-to");
+    }
+
+    #[test]
+    fn wrap_diff_line_uses_preferred_indent_when_it_fits() {
+        // Longer input so the line forces a wrap but the preferred 10-col
+        // indent still fits the continuation:
+        //   "long-from-name → long-to-name" = 29 chars (>25 → wrap)
+        //   indent 10 + "→ long-to-name" (14) = 24 chars (≤25 → fits)
+        // exercises the PREFERRED-indent branch of wrap_diff_line.
+        let out = wrap_diff_line("long-from-name → long-to-name", 25);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "long-from-name");
+        assert_eq!(out[1], "          → long-to-name");
+    }
+
+    #[test]
+    fn wrap_diff_line_no_arrow_unchanged() {
+        let out = wrap_diff_line("plain string with no arrow", 5);
+        assert_eq!(out, vec!["plain string with no arrow".to_string()]);
+    }
+
+    #[test]
+    fn wrap_diff_line_indent_clamps_to_10() {
+        // "very-long-prefix-that-exceeds-10-cols → x" — arrow at col 38,
+        // indent must clamp to 10.
+        let out = wrap_diff_line("very-long-prefix-that-exceeds-10-cols → x", 20);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1], "          → x");
+    }
+
+    #[test]
+    fn wrap_diff_line_indent_uses_from_width_plus_one() {
+        // Pin the +1 in `preferred_indent = (from_width + 1).min(10)`.
+        //
+        // Construction:
+        //   from = "abcdefgh" (width 8), to_part = "→ y" (width 3).
+        //   line_width = 8 + " → " (3) + 1 = 12.
+        //   inner_width = 11 → line overflows by exactly 1 → wrap fires.
+        //   With  +1: preferred_indent = 9 → 9 + 3 = 12 > 11 → COLLAPSES to 0.
+        //   Without +1: preferred_indent = 8 → 8 + 3 = 11 ≤ 11 → stays as 8 spaces.
+        // So this test FAILS if the +1 is dropped (`out[1]` would be
+        // `"        → y"` instead of `"→ y"`).
+        let out = wrap_diff_line("abcdefgh → y", 11);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "abcdefgh");
+        assert_eq!(out[1], "→ y");
+    }
+
+    #[test]
+    fn wrap_diff_line_only_first_arrow_splits() {
+        // Two arrows in input — split on the FIRST.
+        let out = wrap_diff_line("a → b → c", 5);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "a");
+        // Preferred 2-col indent + "→ b → c" (7) = 9 > 5 → collapses to 0.
+        assert_eq!(out[1], "→ b → c");
+    }
+
+    // ---- dynamic width --------------------------------------------------
+
+    #[test]
+    fn render_width_grows_to_content() {
+        // 60-char body line in an 80-col screen — content_w = 60 + 4 = 64,
+        // capped at 80% of screen (64). Modal width must be EXACTLY 64.
+        let long = "a".repeat(60);
+        let o = ConfirmOverlay::new("t", vec![long], "OK", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let palette = StyleMap::no_term();
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
+        o.render(&mut wbuf, screen, &palette).unwrap();
+        let hits = o.button_hits.get_cloned().expect("hits cached");
+        let confirm_right = hits.confirm.left + hits.confirm.width;
+        // Modal width 64 centred in 80-col screen: area.left = 8,
+        // area.width = 64 → confirm.left + confirm.width = 71.
+        assert_eq!(
+            confirm_right, 71,
+            "expected modal width 64 (content-driven); confirm_right={confirm_right} \
+             implies width {} — content grow regression",
+            confirm_right - 7,
+        );
+        // Sanity: the full 60-char content line really lands in the body.
+        let s = String::from_utf8_lossy(wbuf.buffer()).into_owned();
+        assert!(s.contains(&"a".repeat(60)));
+    }
+
+    #[test]
+    fn render_width_clamps_to_screen() {
+        // 200-char line in an 80-col screen — modal width must NOT exceed
+        // 80% of screen (64 cols), so inner width is ≤ 60. Verify by ensuring
+        // a single body row does NOT contain 70+ consecutive 'x' chars.
+        let long = "x".repeat(200);
+        let o = ConfirmOverlay::new("t", vec![long.clone()], "OK", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let s = render_capture(&o, screen);
+        assert!(
+            !s.contains(&"x".repeat(70)),
+            "body line must be clipped within the 80%-of-screen (64 col) cap",
+        );
+    }
+
+    #[test]
+    fn render_width_has_floor_for_short_body() {
+        // Single 1-char body in an 80-col screen — modal width must be
+        // EXACTLY 40 (the floor), inner width 36. We pin this by counting
+        // the cached confirm-button rect's right edge: with floor 40 and
+        // a centred screen of 80, the modal spans cols [20, 60). The
+        // confirm button's right edge sits at `area.left + area.width - 1`
+        // = 59.
+        let o = ConfirmOverlay::new("t", vec!["a".to_string()], "OK", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
+        let palette = StyleMap::no_term();
+        o.render(&mut wbuf, screen, &palette).unwrap();
+        let hits = o.button_hits.get_cloned().expect("hits cached");
+        let confirm_right = hits.confirm.left + hits.confirm.width;
+        // For modal width 40 centred in 80-col screen: area.left = 20,
+        // area.width = 40, so confirm.left + confirm.width = 59.
+        // For any wider modal (e.g. 50), confirm_right would be > 59.
+        assert_eq!(
+            confirm_right, 59,
+            "expected modal width 40 (floor); confirm_right={confirm_right} \
+             implies width {} centred — floor regression",
+            confirm_right - 19,
+        );
+    }
+
+    #[test]
+    fn render_no_panic_at_tiny_screen() {
+        // 20x10 screen — width calc must not panic. The guard
+        // `area.width < 8 || area.height < 5` does NOT fire here
+        // (clamped area is 20x10 → no bail), but a smaller screen
+        // would. This pins the "no panic" property at a realistic
+        // boundary; the actual guard firing is exercised in
+        // `render_bails_at_truly_tiny_screen`.
+        let o = ConfirmOverlay::new("t", vec!["a → b".to_string()], "OK", false, cmd());
+        let screen = Area::new(0, 0, 20, 10);
+        let _ = render_capture(&o, screen); // must not panic
+    }
+
+    #[test]
+    fn render_bails_at_truly_tiny_screen() {
+        // 4x3 screen — centered_rect clamps area to 4x3, the guard
+        // `area.width < 8 || area.height < 5` fires, and render returns
+        // Ok(()) without writing the frame. The button-hit cache must
+        // therefore stay empty.
+        let o = ConfirmOverlay::new("t", vec!["a → b".to_string()], "OK", false, cmd());
+        let screen = Area::new(0, 0, 4, 3);
+        let palette = StyleMap::no_term();
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
+        o.render(&mut wbuf, screen, &palette).unwrap();
+        assert!(
+            o.button_hits.get_cloned().is_none(),
+            "guard should fire — render must bail before caching hits",
+        );
+    }
+
+    // ---- render wrap integration ----
+
+    #[test]
+    fn render_wraps_long_diff_line() {
+        // Single rename line that exceeds the 80%-of-80 = 64 col cap.
+        // After wrap, render bytes must contain BOTH the full `from` path
+        // and the full `to` tail (proving nothing was silently truncated).
+        let from = "/tmp/very-long-source-dir/quite-long-name.txt";
+        let to = "/tmp/very-long-archive-dir/quite-long-name-renamed-v2.txt";
+        let line = format!("{from} → {to}");
+        let o = ConfirmOverlay::new("t", vec![line.clone()], "OK", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let s = render_capture(&o, screen);
+        assert!(s.contains(from), "from path missing from render: {s:?}");
+        assert!(
+            s.contains("quite-long-name-renamed-v2.txt"),
+            "to path tail missing — wrap did not happen: {s:?}",
+        );
+    }
+
+    #[test]
+    fn render_scroll_works_with_wrapped_lines() {
+        // 11 distinct lines (N=11) where every line wraps to 2 rows →
+        // rendered.len() = 22. visible = 11 (height capped at 15, body
+        // rows = 15-4 = 11). render_max_scroll = 22-11 = 11.
+        //
+        // The OLD bug clamped `handle_key(down)` against `body.len()-1`
+        // = 10, so the very last rendered row (the continuation of line
+        // 10) was unreachable: scroll=10 shows rendered[10..21], but
+        // rendered[21] requires scroll=11. The fix clamps against
+        // `body.len()*2 - 1` = 21, so scroll can reach 11.
+        //
+        // Pin: tag each rename's TO path with a UNIQUE marker. Each line
+        // is constructed so the continuation row's marker survives the
+        // inner_width=60 truncate. The marker for line 10 lives in
+        // rendered[21] and is ONLY visible when scroll reaches 11.
+        let body: Vec<String> = (0..11)
+            .map(|i| {
+                // from_part width 35, to_part width 36 (incl "→ ").
+                // continuation = 10-indent + to_part = 46 cols ≤ 60.
+                format!(
+                    "/tmp/source-dir/file-from-{i:02}-end.txt → \
+                     /tmp/archive-dir/MARK{i:02}-end.txt"
+                )
+            })
+            .collect();
+        let mut o = ConfirmOverlay::new("t", body, "OK", false, cmd());
+        for _ in 0..100 {
+            let _ = o.handle_key(key!(down));
+        }
+        // With the fix, scroll reaches the render-side cap (11), so
+        // scroll > 10. Old behaviour clamped at 10.
+        assert!(
+            o.scroll > 10,
+            "scroll {} stuck at old clamp; expected > 10",
+            o.scroll,
+        );
+        let screen = Area::new(0, 0, 80, 24);
+        let s = render_capture(&o, screen);
+        // The UNIQUE marker of the LAST rename's TO path (continuation)
+        // must be in the render bytes — proves rendered[21] is visible.
+        assert!(
+            s.contains("MARK10"),
+            "last continuation row missing from render — keyboard scroll \
+             cannot reach the final wrapped row: {s:?}",
+        );
+    }
+
+    #[test]
+    fn render_short_body_renders_all_lines() {
+        // Backward-compat pin for non-rename callers (rm/trash, etc.):
+        // a short body without arrows must reach the output unchanged.
+        let body = vec!["/tmp/a".to_string(), "/tmp/b".to_string()];
+        let o = ConfirmOverlay::new("Delete?", body, "Delete", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let s = render_capture(&o, screen);
+        assert!(s.contains("/tmp/a"), "first body line missing: {s:?}");
+        assert!(s.contains("/tmp/b"), "second body line missing: {s:?}");
     }
 
 }

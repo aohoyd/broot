@@ -218,6 +218,42 @@ pub fn plan(
     Ok(RenameRun { renames })
 }
 
+/// Build the confirm-modal body lines for a planned `RenameRun`.
+///
+/// Per-pair rule: if `from.parent() == to.parent()`, render basenames
+/// only (the common case — rename in place); otherwise render full
+/// paths on both sides (cross-directory move via absolute edited path).
+pub fn diff_lines(run: &RenameRun) -> Vec<String> {
+    run.renames
+        .iter()
+        .map(|(from, to)| {
+            let same_parent = matches!(
+                (from.parent(), to.parent()),
+                (Some(a), Some(b)) if a == b,
+            );
+            if same_parent {
+                // Basenames if both are UTF-8; otherwise fall back to
+                // the full `display()` form for the offending side
+                // rather than rendering an empty string. The fallback
+                // matches the cross-directory branch below.
+                let f = from
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| from.display().to_string());
+                let t = to
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| to.display().to_string());
+                format!("{f} → {t}")
+            } else {
+                format!("{} → {}", from.display(), to.display())
+            }
+        })
+        .collect()
+}
+
 /// Execute the validated renames on the real filesystem in two phases.
 ///
 /// Phase 1 walks `run.renames` in order. When a target path already
@@ -464,6 +500,73 @@ mod tests {
         let input = "/tmp/foo \n/tmp/bar\n";
         let parsed = parse(input);
         assert_eq!(parsed, vec!["/tmp/foo ".to_string(), "/tmp/bar".to_string()]);
+    }
+
+    #[test]
+    fn diff_lines_same_parent_uses_basenames() {
+        let run = RenameRun {
+            renames: vec![
+                (PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/a-v2.txt")),
+                (PathBuf::from("/tmp/b.txt"), PathBuf::from("/tmp/b-v2.txt")),
+            ],
+        };
+        assert_eq!(
+            diff_lines(&run),
+            vec!["a.txt → a-v2.txt".to_string(), "b.txt → b-v2.txt".to_string()],
+        );
+    }
+
+    #[test]
+    fn diff_lines_cross_dir_uses_full_paths() {
+        let run = RenameRun {
+            renames: vec![(PathBuf::from("/tmp/src/c"), PathBuf::from("/tmp/dst/c"))],
+        };
+        assert_eq!(diff_lines(&run), vec!["/tmp/src/c → /tmp/dst/c".to_string()]);
+    }
+
+    #[test]
+    fn diff_lines_mixed_set_per_line_decision() {
+        let run = RenameRun {
+            renames: vec![
+                (PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/a-v2.txt")),
+                (PathBuf::from("/tmp/src/c"), PathBuf::from("/tmp/dst/c")),
+            ],
+        };
+        assert_eq!(
+            diff_lines(&run),
+            vec![
+                "a.txt → a-v2.txt".to_string(),
+                "/tmp/src/c → /tmp/dst/c".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn diff_lines_top_level_uses_basenames() {
+        // `/a` and `/b` both have parent `/` → same-parent branch fires,
+        // rendering bare basenames.
+        let run = RenameRun {
+            renames: vec![(PathBuf::from("/a"), PathBuf::from("/b"))],
+        };
+        assert_eq!(diff_lines(&run), vec!["a → b".to_string()]);
+    }
+
+    #[test]
+    fn diff_lines_missing_filename_falls_back_to_display() {
+        // `.` and `..` have no `file_name()`, but they DO have a parent
+        // (the empty path), so the same-parent branch fires. The
+        // basename fallback must render the full path via `display()`
+        // rather than the empty string — this pins the C5 fix.
+        let run = RenameRun {
+            renames: vec![(PathBuf::from("."), PathBuf::from(".."))],
+        };
+        assert_eq!(diff_lines(&run), vec![". → ..".to_string()]);
+    }
+
+    #[test]
+    fn diff_lines_empty_run() {
+        let run = RenameRun { renames: vec![] };
+        assert!(diff_lines(&run).is_empty());
     }
 
     #[test]

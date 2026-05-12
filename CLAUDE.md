@@ -165,6 +165,51 @@ runs for `Internal::bulk_rename` / `Internal::bulk_rename_apply`
 because the App-level intercept catches them first — they don't
 reach the deny-list check at all.
 
+## ConfirmOverlay sizing and soft-wrap
+
+Scope: applies to every `ConfirmOverlay` caller (bulk-rename,
+destructive verbs, mv/cp overwrite, bulk staging), not just
+bulk-rename. Placed alongside the bulk-rename sub-section because that
+is what motivated the dynamic-width and soft-wrap work, but the
+behaviour is generic.
+
+`ConfirmOverlay::render` sizes the modal in this order
+(`src/app/overlay/confirm.rs:155-205`):
+
+1. **Width**: `want_w = max(content_w, title_w, buttons_w, 40).min(80%
+   of screen.width)`. Each of the first three terms includes a 4-cell
+   horizontal-padding allowance. All widths use `UnicodeWidthStr::width`
+   (so CJK double-width chars cost 2 cells each). Floor 40 keeps short
+   rm/trash prompts from collapsing; 80% cap prevents edge-to-edge
+   modals on wide terminals. Body widths are saturating-cast to `u16`
+   to avoid silent overflow on pathological inputs. There is no
+   `Confirm::with_width(_)` knob — the sizing is derived, not
+   configured.
+2. **Wrap**: body lines containing `" → "` that overflow `inner_width`
+   (= `want_w - 4`) soft-wrap via `wrap_diff_line`
+   (`src/app/overlay/confirm.rs:417`): the prefix paints on one row,
+   the arrow + suffix paints on a continuation row indented by
+   `min(from_width + 1, 10)` spaces. The `+1` aligns the continuation
+   `→` one column to the right of the original arrow column (under
+   the space that preceded it), not directly under the arrow. The
+   indent **collapses to 0** when even the indented continuation would
+   overflow `inner_width` — visibility of the new path beats column
+   alignment. Lines without `" → "` are not wrapped; they fall back
+   to the tail-truncate-with-ellipsis path so non-rename callers
+   (rm/trash bodies, single-line prompts) keep working unchanged.
+3. **Height**: `want_h = (rendered.len() + 5).min(15)` where `rendered`
+   is the **post-wrap** row vector. This is what lets the modal grow
+   when many body lines wrap to two rows. A 5-line body where every
+   line wraps produces `rendered.len() = 10` → `want_h = 15`, not 10.
+
+Body iteration in `render` walks `rendered` (post-wrap), and the
+in-render `max_scroll` operates on `rendered.len()`. `handle_key(down)`
+does NOT see the post-wrap count (no render area), so it clamps
+against an upper bound of `body.len() * 2 - 1` — safe because
+`wrap_diff_line` produces at most 2 rows per input. The precise
+re-clamp happens in `render`. The two clamps are independent values,
+not the same expression.
+
 ## Verb confirmation system
 
 `Verb::requires_confirm: bool` (`src/verb/verb.rs:81`) is the explicit
