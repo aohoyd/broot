@@ -268,9 +268,16 @@ impl OverlayState for ConfirmOverlay {
         // Layout the two buttons left/right of the centre line.
         // Cancel sits in the left half, confirm in the right half.
         let cancel_x = area.left + 1;
-        let cancel_w = (cancel_text.chars().count() as u16).min(half.saturating_sub(2));
-        let confirm_w =
-            (confirm_text.chars().count() as u16).min(area.width.saturating_sub(half + 2));
+        // Display width — must use `UnicodeWidthStr` (NOT `chars().count()`)
+        // so a CJK confirm label like `削除` measures as 4 cells, not 2
+        // chars. Mis-measuring here both clips the painted label and
+        // leaves the cached `ButtonHits` rect out of sync with the
+        // glyphs the user sees, so mouse routing would land on the wrong
+        // hit.
+        let cancel_w =
+            (UnicodeWidthStr::width(cancel_text) as u16).min(half.saturating_sub(2));
+        let confirm_w = (UnicodeWidthStr::width(confirm_text.as_str()) as u16)
+            .min(area.width.saturating_sub(half + 2));
         let confirm_x = area.left + area.width - 1 - confirm_w;
 
         let cancel_focused = matches!(self.focus, ConfirmFocus::Cancel);
@@ -608,16 +615,31 @@ mod tests {
         // overflows ("UNIQUE_LINE_25 …"). To keep the assertion
         // robust we exclude index 25 — the line immediately before
         // (index 24) is rendered in full, which is enough to prove
-        // scrolling actually happened. The original `(12..28)` window
-        // both included indices that should never appear (≤14, ≥26)
-        // and silently tolerated breakages within them.
-        let visible_first = 15;
-        let visible_last_full = 24; // exclusive bound 25 (ellipsis row).
-        let any_late =
-            (visible_first..visible_last_full + 1).any(|i| s.contains(&format!("UNIQUE_LINE_{i}")));
+        // scrolling actually happened.
+        //
+        // Tightening: a previous version of this test allowed any
+        // index in `[15, 25)`, but UNIQUE_LINE_15 ALSO appears at
+        // scroll = 5..15, so a partial-scroll regression (e.g.
+        // `min(scroll, body.len()/2)`) would silently pass. Pin both:
+        //
+        //   * `UNIQUE_LINE_24` is in the rendered window — proves the
+        //     scroll reached at least 14 (window includes [scroll,
+        //     scroll+11) and 24 first becomes visible at scroll=14).
+        //   * `UNIQUE_LINE_5` is NOT in the rendered window — proves
+        //     the scroll exceeded 5 (a regression that clamped at
+        //     scroll=5 would leak _5 into the visible bytes).
+        //
+        // Together these straddle the intended scroll position of 15
+        // with a one-step tolerance on each side.
         assert!(
-            any_late,
-            "expected a post-scroll body line in render bytes; got: {s:?}",
+            s.contains("UNIQUE_LINE_24"),
+            "expected UNIQUE_LINE_24 in render at scroll=15 — \
+             scroll did not advance far enough: {s:?}",
+        );
+        assert!(
+            !s.contains("UNIQUE_LINE_5"),
+            "UNIQUE_LINE_5 must not be visible at scroll=15 — a \
+             partial-scroll regression is leaking earlier rows: {s:?}",
         );
     }
 
@@ -1040,6 +1062,81 @@ mod tests {
             s.contains("MARK10"),
             "last continuation row missing from render — keyboard scroll \
              cannot reach the final wrapped row: {s:?}",
+        );
+    }
+
+    #[test]
+    fn render_height_grows_to_rendered_count_no_scroll_needed() {
+        // Pin the geometry fix: `want_h` is sized from `rendered.len()`
+        // (the post-wrap row count), NOT `self.body.len()`. With N=3
+        // body lines that all wrap to 2 rows each:
+        //
+        //   * NEW formula: want_h = rendered.len()+5 = 6+5 = 11 (≤15).
+        //     visible body rows = 11-4 = 7. max_scroll = max(0, 6-7) = 0.
+        //     All 6 rendered rows are visible at scroll=0 — every line's
+        //     continuation marker reaches the output.
+        //
+        //   * OLD formula: want_h = body.len()+5 = 3+5 = 8.
+        //     visible = 4. max_scroll = 6-4 = 2. At scroll=0 only the
+        //     first 4 rendered rows paint (lines 0-1 fully, line 2
+        //     missing entirely). The MARK02 marker of line 2's
+        //     continuation row would be absent from render bytes.
+        //
+        // So this test FAILS if `want_h` reverts to using `body.len()`.
+        //
+        // Each `from` is exactly 35 cols wide, `to` is 36 cols wide
+        // (including the arrow): total line width = 35 + " → " (3) + 33
+        // marker = 71 cols. With screen=80, max_w=64, want_w pegged at
+        // 64, inner_width=60. 71 > 60 → wrap fires for every line.
+        // Continuation (10-col indent + 33-col marker = 43 cols) ≤ 60 →
+        // PREFERRED-indent branch keeps the marker visible.
+        let body: Vec<String> = (0..3)
+            .map(|i| {
+                format!(
+                    "/tmp/source-dir/file-from-{i:02}-end.txt → \
+                     /tmp/archive-dir/MARK{i:02}-end.txt"
+                )
+            })
+            .collect();
+        let o = ConfirmOverlay::new("t", body, "OK", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let s = render_capture(&o, screen);
+        // scroll=0 (default); every line's continuation marker must be
+        // in the painted bytes. With the OLD formula MARK02 is missing.
+        for i in 0..3 {
+            let marker = format!("MARK{i:02}");
+            assert!(
+                s.contains(&marker),
+                "marker {marker} missing at scroll=0 — modal height did \
+                 not grow to fit wrapped rows (want_h must size from \
+                 rendered.len(), not body.len()): {s:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn render_emits_ellipsis_when_body_overflows() {
+        // Pin the overflow-ellipsis path: when the body is too tall for
+        // the visible window AND there are more rendered rows beyond
+        // the last paintable one, the last visible row must end with
+        // `" …"`. Without this assertion the entire
+        // `truncate_with_ellipsis` branch could be deleted and no test
+        // would notice.
+        //
+        // 20 short single-row lines → rendered.len() = 20.
+        // want_h = 20+5 = 25, capped at 15. visible = 11.
+        // last_visible_idx (scroll=0) = 11; overflow = 20 > 11 → true.
+        // The 11th row (body_idx=10) is the last visible AND
+        // body_idx+1 = 11 < 20 → ellipsis branch fires.
+        let body: Vec<String> = (0..20).map(|i| format!("row-{i:02}")).collect();
+        let o = ConfirmOverlay::new("t", body, "OK", false, cmd());
+        let screen = Area::new(0, 0, 80, 24);
+        let s = render_capture(&o, screen);
+        assert!(
+            s.contains('…'),
+            "ellipsis glyph missing — overflow-truncate branch did not \
+             fire even though body (20 rows) overflows the 11-row \
+             visible window: {s:?}",
         );
     }
 

@@ -194,9 +194,15 @@ behaviour is generic.
    the space that preceded it), not directly under the arrow. The
    indent **collapses to 0** when even the indented continuation would
    overflow `inner_width` — visibility of the new path beats column
-   alignment. Lines without `" → "` are not wrapped; they fall back
-   to the tail-truncate-with-ellipsis path so non-rename callers
-   (rm/trash bodies, single-line prompts) keep working unchanged.
+   alignment. Lines without `" → "` are returned unchanged by
+   `wrap_diff_line` and reach `truncate_to_width` at render time
+   (`src/app/overlay/confirm.rs:255`); the `truncate_with_ellipsis`
+   branch only fires on the last painted row when the body overflows
+   the visible window AND more rendered rows remain below the cut
+   (`:252`). Typical short rm/trash bodies fit inside the window, so
+   their lines never see the ellipsis — they paint verbatim (or
+   tail-truncated by `truncate_to_width` if a single line is wider
+   than `inner_width`).
 3. **Height**: `want_h = (rendered.len() + 5).min(15)` where `rendered`
    is the **post-wrap** row vector. This is what lets the modal grow
    when many body lines wrap to two rows. A 5-line body where every
