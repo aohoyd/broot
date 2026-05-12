@@ -160,9 +160,10 @@ the surviving subset), and all panels refresh so the tree reflects
 the partial state. Phase-1 temps that survive a phase-2 failure are
 intentionally left on disk under their `.broot-bulk-tmp-{idx}` names.
 
-The bulk-stage confirm intercept (`maybe_bulk_stage_confirm`) skips
-the two bulk-rename internals (added alongside the stage-management
-list) so the dedicated diff modal is the only confirm the user sees.
+The bulk-stage confirm intercept (`maybe_bulk_stage_confirm`) never
+runs for `Internal::bulk_rename` / `Internal::bulk_rename_apply`
+because the App-level intercept catches them first — they don't
+reach the deny-list check at all.
 
 ## Verb confirmation system
 
@@ -197,28 +198,32 @@ dispatch; the first match wins:
 
 1. Bulk staging — `App::maybe_bulk_stage_confirm`
    (`src/app/app.rs:669`). Fires only when the stage panel is the
-   active panel and `app_state.stage.len() >= 2`. Skips two classes of
-   internals via `is_stage_management_internal`
-   (`src/app/app.rs:1310`). First, the stage-management internals
-   (`Internal::stage`, `unstage`, `toggle_stage`, `clear_stage`,
-   `stage_all_directories`, `stage_all_files`, `open_staging_area`,
-   `close_staging_area`, `toggle_staging_area`,
-   `focus_staging_area_no_open`) — they operate on the stage itself,
-   not on its contents. Second, the pure navigation internals
-   (`line_up`, `line_down`, `line_up_no_cycle`, `line_down_no_cycle`,
-   `page_up`, `page_down`, `select_first`, `select_last`) — pressing
-   j/k/PgUp/PgDn moves the cursor inside the stage panel, it doesn't
-   fan out across staged paths, so a "Run :line_down on N files?"
-   prompt would be nonsensical. Both classes share one bypass function
-   because the call site only needs a yes/no decision; the dual
-   purpose is documented at the `matches!` arm. `select_first` /
-   `select_last` are added defensively — navigation-shaped, even
-   though `stage_state.rs` does not dispatch them today. A third set
-   of internals is bypassed inline at the call site (not through
-   `is_stage_management_internal`): `Internal::bulk_rename`,
-   `Internal::bulk_rename_apply`, and `Internal::add` — these open
-   their own dedicated modals and must not surface the generic
-   "Run :<verb> on N files?" confirm.
+   active panel and `app_state.stage.len() >= 2`. The internal-side
+   logic is a **deny-list**: confirm only when the resolved verb is
+   external, or when the resolved internal is in
+   `is_stage_consuming_internal` (`src/app/app.rs:1310`). Everything
+   else — navigation, app-level verbs (`:quit`, `:help`, `:back`,
+   `:escape`, `:refresh`), panel switching, every `:toggle_*`, every
+   `:sort_by_*`, every `:input_*`, search, bookmarks, stage-management
+   itself, `:focus`, the bulk-rename and add modals — bypasses
+   automatically. The deny-list has nine entries:
+
+   | Internal | Why it fans out |
+   |---|---|
+   | `copy_from_staging` | Copies N staged files to a destination |
+   | `move_from_staging` | Moves N staged files to a destination |
+   | `trash` | Sends N staged files to trash |
+   | `open_stay` | Opens N files externally without leaving broot |
+   | `open_leave` | Opens N files externally and exits broot |
+   | `open_preview` | Opens N files in the preview pane |
+   | `print_path` | Prints all staged absolute paths to stdout |
+   | `print_relative_path` | Prints all staged relative paths |
+   | `print_tree` | Prints the tree of staged paths |
+
+   New internals that iterate the stage MUST be added here, or they
+   will silently bypass the confirm and run without a user warning.
+   The doc-comment above `is_stage_consuming_internal` repeats this
+   invariant.
 2. Overwrite check — resolved destination of `:cp`/`:mv` already
    `exists()`.
 3. Per-verb `requires_confirm` (and the `Internal::trash` shape, which

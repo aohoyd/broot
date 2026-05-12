@@ -692,20 +692,15 @@ impl App {
             Command::VerbTrigger { verb_id, .. } => con.verb_store.verb(*verb_id),
             _ => return None,
         };
-        // Skip stage-management internals — these manipulate the
-        // staging area itself rather than acting on the staged paths.
-        // Also skip the bulk-rename internals: they have their own
-        // multi-file flow (diff modal + apply) and must not surface a
-        // generic "Run :bulk_rename on N files?" confirm.
-        // Likewise `Internal::add`: it opens the AddOverlay (a single
-        // create-file modal); it does not fan out across staged paths.
+        // Confirm only when the resolved internal actually iterates
+        // the stage's contents (see `is_stage_consuming_internal`).
+        // Everything else — navigation, toggles, app-level verbs like
+        // `:quit` / `:help`, the input-row edits, etc. — bypasses.
+        // `bulk_rename` / `bulk_rename_apply` are intercepted at the
+        // App level before this function runs, so they never get here;
+        // `add` opens its own modal and is not stage-consuming.
         if let Some(internal) = verb.get_internal() {
-            if is_stage_management_internal(internal)
-                || matches!(
-                    internal,
-                    Internal::bulk_rename | Internal::bulk_rename_apply | Internal::add,
-                )
-            {
+            if !is_stage_consuming_internal(internal) {
                 return None;
             }
         }
@@ -1302,40 +1297,27 @@ fn resolved_internal(cmd: &Command, con: &AppContext) -> Option<Internal> {
     }
 }
 
-/// Whether an internal verb is a stage-management action (i.e. it
-/// edits the staging area itself rather than acting on the staged
-/// paths). The bulk-confirm overlay must skip these — prompting
-/// "Run :unstage on 5 files?" when the user just wants to drop a
-/// single highlighted entry would be nonsensical.
-fn is_stage_management_internal(internal: Internal) -> bool {
+/// Whether an internal verb logically iterates over the staging
+/// area's contents (one action per staged file). The bulk-stage
+/// confirm intercept uses this as a deny-list: anything not in this
+/// set bypasses the confirm even when invoked from the stage panel
+/// with `>= 2` staged files. External verbs always confirm — the
+/// inversion only narrows the *internal*-side scope.
+///
+/// New variants that fan out across the stage MUST be added here, or
+/// they will silently skip the confirm and run without user warning.
+fn is_stage_consuming_internal(internal: Internal) -> bool {
     matches!(
         internal,
-        // Stage-management internals: manipulate the staging area
-        // itself rather than acting on the staged paths.
-        Internal::stage
-            | Internal::unstage
-            | Internal::toggle_stage
-            | Internal::clear_stage
-            | Internal::stage_all_directories
-            | Internal::stage_all_files
-            | Internal::open_staging_area
-            | Internal::close_staging_area
-            | Internal::toggle_staging_area
-            | Internal::focus_staging_area_no_open
-            // Pure navigation internals: move the selection within
-            // the stage panel without acting on the staged paths.
-            // Prompting "Run :line_down on N files?" would be
-            // nonsensical. `select_first` / `select_last` are added
-            // defensively — navigation-shaped, not dispatched by
-            // `stage_state.rs` today.
-            | Internal::line_up
-            | Internal::line_down
-            | Internal::line_up_no_cycle
-            | Internal::line_down_no_cycle
-            | Internal::page_up
-            | Internal::page_down
-            | Internal::select_first
-            | Internal::select_last
+        Internal::copy_from_staging
+            | Internal::move_from_staging
+            | Internal::open_leave
+            | Internal::open_preview
+            | Internal::open_stay
+            | Internal::print_path
+            | Internal::print_relative_path
+            | Internal::print_tree
+            | Internal::trash
     )
 }
 
@@ -1824,68 +1806,78 @@ mod confirm_helper_tests {
     // -------------------------------------------------------------
 
     #[test]
-    fn stage_management_internals_are_skipped() {
-        // These all manipulate the staging area itself rather than
-        // acting on its contents. They must NOT trigger the bulk
-        // overlay even when the user invokes them with the stage
-        // panel active and >1 staged files.
+    fn stage_consuming_internals_trigger_confirm() {
+        // These internals fan out across the stage's contents (one
+        // action per staged file) or explicitly iterate the stage.
+        // With the stage panel active and >=2 staged files, invoking
+        // any of them must surface the bulk-stage confirm.
         for internal in [
+            Internal::copy_from_staging,
+            Internal::move_from_staging,
+            Internal::open_leave,
+            Internal::open_preview,
+            Internal::open_stay,
+            Internal::print_path,
+            Internal::print_relative_path,
+            Internal::print_tree,
+            Internal::trash,
+        ] {
+            assert!(
+                is_stage_consuming_internal(internal),
+                "{internal:?} must be classified as stage-consuming"
+            );
+        }
+    }
+
+    #[test]
+    fn non_stage_consuming_internals_bypass_confirm() {
+        // Representative sample covering every bypass category:
+        // app-level (quit, help, back, escape, refresh), cross-panel
+        // (panel_left, focus_panel_right), tree navigation (parent,
+        // up_tree, next_match), within-panel navigation (line_down,
+        // page_up, select_first), display toggles (toggle_hidden,
+        // sort_by_size, set_panel_width, default_layout), input-row
+        // edits (input_clear, input_go_word_left), search/bookmarks
+        // (total_search, goto_bookmarks), stage management itself
+        // (stage, unstage, clear_stage, focus_staging_area_no_open),
+        // and the carve-outs that used to live at the call site
+        // (bulk_rename, bulk_rename_apply, add, focus). None of these
+        // touch the stage's contents.
+        for internal in [
+            Internal::quit,
+            Internal::help,
+            Internal::back,
+            Internal::escape,
+            Internal::refresh,
+            Internal::panel_left,
+            Internal::focus_panel_right,
+            Internal::parent,
+            Internal::up_tree,
+            Internal::next_match,
+            Internal::line_down,
+            Internal::page_up,
+            Internal::select_first,
+            Internal::toggle_hidden,
+            Internal::sort_by_size,
+            Internal::set_panel_width,
+            Internal::default_layout,
+            Internal::input_clear,
+            Internal::input_go_word_left,
+            Internal::total_search,
+            Internal::goto_bookmarks,
             Internal::stage,
             Internal::unstage,
-            Internal::toggle_stage,
             Internal::clear_stage,
-            Internal::stage_all_directories,
-            Internal::stage_all_files,
-            Internal::open_staging_area,
-            Internal::close_staging_area,
-            Internal::toggle_staging_area,
             Internal::focus_staging_area_no_open,
-        ] {
-            assert!(
-                is_stage_management_internal(internal),
-                "{internal:?} must be classified as stage-management"
-            );
-        }
-    }
-
-    #[test]
-    fn non_stage_management_internals_are_not_skipped() {
-        // Sample of internals that should NOT be classified as
-        // stage-management — these may legitimately fan out across
-        // staged paths (open_stay, copy_path) or are unrelated.
-        for internal in [
-            Internal::open_stay,
-            Internal::open_leave,
-            Internal::trash,
-            Internal::copy_path,
+            Internal::bulk_rename,
+            Internal::bulk_rename_apply,
+            Internal::add,
             Internal::focus,
+            Internal::copy_path,
         ] {
             assert!(
-                !is_stage_management_internal(internal),
-                "{internal:?} must NOT be classified as stage-management"
-            );
-        }
-    }
-
-    #[test]
-    fn stage_navigation_internals_are_skipped() {
-        // Pure navigation internals must NOT trigger the bulk-confirm
-        // overlay when the user is on the stage panel with >1 staged
-        // files. Pressing j/k/PgUp/PgDn (and the no-cycle / first /
-        // last variants) is movement, not a fan-out verb dispatch.
-        for internal in [
-            Internal::line_up,
-            Internal::line_down,
-            Internal::line_up_no_cycle,
-            Internal::line_down_no_cycle,
-            Internal::page_up,
-            Internal::page_down,
-            Internal::select_first,
-            Internal::select_last,
-        ] {
-            assert!(
-                is_stage_management_internal(internal),
-                "{internal:?} must be bypassed by the bulk-stage confirm intercept"
+                !is_stage_consuming_internal(internal),
+                "{internal:?} must bypass the bulk-stage confirm intercept"
             );
         }
     }
@@ -2029,39 +2021,6 @@ mod bulk_rename_routing_tests {
         let con = make_app_context();
         assert_eq!(resolved_internal(&Command::None, &con), None);
         assert_eq!(resolved_internal(&Command::Click(0, 0), &con), None);
-    }
-
-    /// Pin that the bulk-rename internals are excluded from the
-    /// bulk-stage confirm intercept. With the stage panel active and
-    /// 2+ staged paths, any verb invocation would normally surface a
-    /// "Run :<verb> on N files?" overlay; `bulk_rename` has its own
-    /// diff modal, so the generic confirm must be skipped. We test by
-    /// directly invoking the production classifier helper used inside
-    /// `maybe_bulk_stage_confirm`.
-    #[test]
-    fn bulk_rename_internals_are_excluded_from_bulk_stage_confirm() {
-        // The classification rule lives inline in `maybe_bulk_stage_confirm`:
-        //   is_stage_management_internal(internal)
-        //     || matches!(internal, Internal::bulk_rename
-        //                          | Internal::bulk_rename_apply
-        //                          | Internal::add)
-        // We pin both halves: stage-management is covered by other tests,
-        // here we pin that bulk-rename + add are excluded.
-        for internal in [
-            Internal::bulk_rename,
-            Internal::bulk_rename_apply,
-            Internal::add,
-        ] {
-            let excluded = is_stage_management_internal(internal)
-                || matches!(
-                    internal,
-                    Internal::bulk_rename | Internal::bulk_rename_apply | Internal::add,
-                );
-            assert!(
-                excluded,
-                "{internal:?} must be excluded from the bulk-stage confirm intercept",
-            );
-        }
     }
 
     /// Pin that the fall-through path finds an external `rename` verb
