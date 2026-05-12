@@ -96,9 +96,18 @@ impl OverlayState for SortOverlay {
         palette: &StyleMap,
     ) -> io::Result<()> {
         // ---- geometry ---------------------------------------------------
-        // Mirror the confirm-overlay short-body sizing: floor 40, cap
-        // 80% of screen.width, height = body rows + 5 (frame + padding)
-        // capped at 15.
+        // Width: mirror the confirm-overlay short-body sizing — floor 40,
+        // cap 80% of screen.width.
+        //
+        // Height: SortOverlay has no buttons row (unlike the confirm
+        // overlay's "Yes/No" footer), so its frame overhead is 3 rows,
+        // not 5: top frame edge + 1 blank "breathing" row above the
+        // bottom frame + bottom frame edge. The body painter (below)
+        // computes `body_capacity = area.height - 3` for exactly the
+        // same reason — both numbers MUST stay equal or the modal will
+        // either clip rows (capacity too small) or leave trailing
+        // blank rows (capacity too large). Capped at 15 to keep the
+        // modal compact on tall terminals.
         let title = "Sort by";
 
         let max_w = (screen.width as u32 * 8 / 10) as u16;
@@ -114,7 +123,7 @@ impl OverlayState for SortOverlay {
         let want_w = content_w.max(title_w).max(40).min(max_w);
 
         let want_h: u16 = (SORT_ROWS.len().min(u16::MAX as usize) as u16)
-            .saturating_add(5)
+            .saturating_add(3)
             .min(15);
 
         let area = frame::centered_rect(screen, want_w, want_h);
@@ -369,6 +378,42 @@ mod tests {
         let mut o = SortOverlay::new();
         let r = o.handle_key(key!(enter));
         assert!(matches!(r, OverlayOutcome::Stay));
+    }
+
+    // ---- SORT_ROWS / handle_key sync pin --------------------------------
+    //
+    // `SORT_ROWS` (display) and `handle_key` (dispatch) are two
+    // independent data structures — there is no compile-time link
+    // between the letters listed in the body table and the branches
+    // matched in `handle_key`. A future contributor could add a new
+    // sort mode to `SORT_ROWS` without adding a `handle_key` branch
+    // (the row would render but the keystroke would silently fall
+    // through to `Stay`), or vice-versa. Pin the invariant: every
+    // letter that ships in `SORT_ROWS` MUST resolve to a
+    // `CloseAndRun` outcome.
+    //
+    // The inverse direction (every `handle_key` branch is reachable
+    // from a row) is intentionally NOT pinned — adding a hidden alias
+    // (e.g. an extra `m` for the modal-test path) is sometimes useful
+    // and shouldn't trip this test.
+
+    #[test]
+    fn every_sort_row_letter_dispatches() {
+        use crokey::crossterm::event::KeyCode;
+        for (letter, label) in SORT_ROWS {
+            let mut o = SortOverlay::new();
+            // Bare lowercase letters produce a `KeyCombination` with
+            // no modifiers and `KeyCode::Char(letter)` — exactly the
+            // shape `key!('x')` constructs at compile time.
+            let kc: KeyCombination = KeyCode::Char(*letter).into();
+            let r = o.handle_key(kc);
+            assert!(
+                matches!(r, OverlayOutcome::CloseAndRun(_)),
+                "SORT_ROWS row for {letter:?} ({label:?}) is rendered \
+                 but `handle_key` does not dispatch it — every visible \
+                 letter must produce CloseAndRun, got Stay/Close",
+            );
+        }
     }
 
     // ---- mouse ----------------------------------------------------------

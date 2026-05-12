@@ -95,7 +95,7 @@ alongside the selection (i.e. its parent). The bound key is `alt-n`
 on success — the App synthesizes a `:focus <full>` invocation so the
 just-created entry becomes selected and the tree scrolls to it. The
 overlay also bails out as a no-op render when
-`area.width < 8 || area.height < 5` (`src/app/overlay/add.rs:226`) so
+`area.width < 8 || area.height < 5` (`src/app/overlay/add.rs:227`) so
 pathologically small terminals don't draw a half-frame.
 
 Overwrite policy: `try_commit` refuses to clobber an existing entry.
@@ -503,8 +503,8 @@ are pathological at that width anyway.
 Five production call sites pass the `selected` arg: the panel render
 in `src/app/app_panels.rs:712` forwards `panel.state().title_selected()`;
 the four overlay renderers (`src/app/overlay/goto.rs:195`,
-`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:244`,
-`src/app/overlay/sort.rs:150`) always pass `false` — overlays have no
+`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:245`,
+`src/app/overlay/sort.rs:148`) always pass `false` — overlays have no
 selectable root.
 
 ### Sort overlay — `Internal::open_sort_overlay` / `SortOverlay`

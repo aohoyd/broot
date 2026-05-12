@@ -181,6 +181,8 @@ Alt-modifier (both modes):
 | <kbd>alt</kbd><kbd>s</kbd> | toggle staging area panel |
 | <kbd>alt</kbd><kbd>p</kbd> | toggle preview panel |
 | <kbd>alt</kbd><kbd>t</kbd> | toggle tree visibility |
+| <kbd>alt</kbd><kbd>b</kbd> | open bookmarks modal |
+| <kbd>alt</kbd><kbd>n</kbd> | create new file or directory |
 
 Pressing `o` opens a single-key sort overlay: `s` size, `d` date,
 `c` count, `t` type, `f` type (dirs first), `l` type (dirs last),

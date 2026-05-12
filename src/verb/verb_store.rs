@@ -973,10 +973,11 @@ mod vim_bindings_tests {
         store.verbs().iter().find(|v| v.keys.contains(&key))
     }
 
-    /// Table-driven check for the 13 always-on Command-mode bindings.
-    /// The set includes bare letters, shifted letters, and `=`. Each
-    /// row binds a `KeyCombination` to either an `Internal` (for
-    /// internal verbs) or to a verb name (for externals like `:rm`).
+    /// Table-driven check for the 18 always-on Command-mode bindings
+    /// (17 internals + 1 external `:rm`). The set includes bare letters,
+    /// shifted letters, and `=`. Each row binds a `KeyCombination` to
+    /// either an `Internal` (for internal verbs) or to a verb name (for
+    /// externals like `:rm`).
     #[test]
     fn vim_bindings_resolve() {
         let mut conf = Conf::default();
@@ -991,6 +992,12 @@ mod vim_bindings_tests {
         // that crossterm emits for `Shift+G`.
         let internal_bindings: &[(KeyCombination, Internal)] = &[
             (key!('r'), Internal::bulk_rename),
+            // y/x are NOT clipboard-gated — `copy_from_staging` and
+            // `move_from_staging` move files between paths, they don't
+            // touch the system clipboard. The four `clipboard` verbs
+            // (copy_name, copy_path, copy_file_content, plus shift-Y)
+            // live in `vim_bindings_resolve_clipboard` below.
+            (key!('y'), Internal::copy_from_staging),
             (key!('x'), Internal::move_from_staging),
             (key!('o'), Internal::open_sort_overlay),
             (key!('b'), Internal::bookmarks),
@@ -1061,16 +1068,19 @@ mod vim_bindings_tests {
         );
     }
 
-    /// Clipboard-gated bindings: these four verbs are only registered
+    /// Clipboard-gated bindings: these three verbs are only registered
     /// when the `clipboard` feature is enabled. Their key bindings live
     /// alongside the registrations and so are also feature-gated.
+    ///
+    /// Note: `y` (`copy_from_staging`) and `x` (`move_from_staging`) are
+    /// NOT in this list — they copy/move files between paths and are
+    /// registered unconditionally. They're pinned in `vim_bindings_resolve`.
     #[cfg(feature = "clipboard")]
     #[test]
     fn vim_bindings_resolve_clipboard() {
         let mut conf = Conf::default();
         let store = VerbStore::new(&mut conf).unwrap();
         let bindings: &[(KeyCombination, Internal)] = &[
-            (key!('y'), Internal::copy_from_staging),
             (key!(shift - y), Internal::copy_file_content),
             (key!('c'), Internal::copy_name),
             (key!(shift - c), Internal::copy_path),
@@ -1093,10 +1103,11 @@ mod vim_bindings_tests {
         }
     }
 
-    /// Table-driven check for the 6 alt-modifier bindings on the
-    /// panel-toggle internals. Alt-modifier bindings work in both Input
-    /// and Command modes (alt-* keys bypass `is_key_only_modal`), so
-    /// these are always live regardless of `modal:` config.
+    /// Table-driven check for the 8 alt-modifier bindings (six panel
+    /// toggles plus the bookmarks and add modals). Alt-modifier bindings
+    /// work in both Input and Command modes (alt-* keys bypass
+    /// `is_key_only_modal`), so these are always live regardless of
+    /// `modal:` config.
     #[test]
     fn vim_alt_bindings_resolve() {
         let mut conf = Conf::default();
@@ -1181,6 +1192,63 @@ mod vim_bindings_tests {
             last.has_name("sort_by_type_dirs_last"),
             "sort_by_type_dirs_last must be invocable by name (\
              SortOverlay's `l` key dispatches via name)",
+        );
+    }
+
+    /// Dispatch-path pin test: the sort overlay's `f` and `l` keystrokes
+    /// produce `Command::from_raw(":sort_by_type_dirs_first", true)` and
+    /// `Command::from_raw(":sort_by_type_dirs_last", true)`. The
+    /// `apply_command` re-dispatch path resolves those leading-`:` verb
+    /// invocations through `VerbStore::search_sel_info_unique`, NOT
+    /// through `v.is_internal(...)` (which the test above checks). If a
+    /// future refactor changes `search_sel_info_unique` to drop these
+    /// names — for example by adding a `needs_selection`-style filter
+    /// that excludes the sort internals — the registration-check test
+    /// above will still pass while `f` / `l` silently break. This test
+    /// exercises the actual lookup function, so the dispatch path is
+    /// pinned end-to-end.
+    ///
+    /// `SelInfo::None` + `panel_state_type: None` + `stage_is_empty: true`
+    /// is the most permissive call shape; the sort internals MUST resolve
+    /// under that shape, because the overlay can be opened from any
+    /// panel and the sort affects the tree regardless of selection or
+    /// stage state.
+    #[test]
+    fn sort_by_type_dirs_dispatch_via_search() {
+        use crate::app::SelInfo;
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+
+        let first = store
+            .search_sel_info_unique(
+                "sort_by_type_dirs_first",
+                SelInfo::None,
+                None,
+                true,
+            )
+            .expect(
+                "`:sort_by_type_dirs_first` must resolve via the verb-name \
+                 search path used by apply_command re-dispatch",
+            );
+        assert_eq!(
+            first.get_internal(),
+            Some(Internal::sort_by_type_dirs_first),
+        );
+
+        let last = store
+            .search_sel_info_unique(
+                "sort_by_type_dirs_last",
+                SelInfo::None,
+                None,
+                true,
+            )
+            .expect(
+                "`:sort_by_type_dirs_last` must resolve via the verb-name \
+                 search path used by apply_command re-dispatch",
+            );
+        assert_eq!(
+            last.get_internal(),
+            Some(Internal::sort_by_type_dirs_last),
         );
     }
 }
