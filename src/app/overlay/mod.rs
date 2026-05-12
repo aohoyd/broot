@@ -13,10 +13,12 @@
 mod add;
 mod confirm;
 mod goto;
+mod sort;
 
 pub use add::AddOverlay;
 pub use confirm::ConfirmOverlay;
 pub use goto::GotoOverlay;
+pub use sort::SortOverlay;
 // `ConfirmFocus` is an internal detail of the confirm overlay (the
 // tests inside `confirm.rs` reference it directly via `super::`); it
 // deliberately has no module-level re-export here to keep the public
@@ -134,6 +136,7 @@ pub trait OverlayState {
 ///   used for rm/trash, mv/cp overwrite and bulk staging.
 /// - `Goto(GotoOverlay)` — bookmark jump menu.
 /// - `Add(AddOverlay)` — create file or directory modal.
+/// - `Sort(SortOverlay)` — pick a sort mode with a single keystroke.
 ///
 /// The `Stub` variant is test-only and exists so the dispatch shims
 /// can be exercised before the real variants land.
@@ -144,6 +147,8 @@ pub enum Overlay {
     Goto(GotoOverlay),
     /// Create file or directory modal.
     Add(AddOverlay),
+    /// Sort-mode picker.
+    Sort(SortOverlay),
     /// Test-only variant for routing tests.
     #[cfg(test)]
     Stub(StubOverlay),
@@ -163,6 +168,7 @@ impl Overlay {
             Overlay::Confirm(o) => o.render(w, screen, palette),
             Overlay::Goto(o) => o.render(w, screen, palette),
             Overlay::Add(o) => o.render(w, screen, palette),
+            Overlay::Sort(o) => o.render(w, screen, palette),
             #[cfg(test)]
             Overlay::Stub(s) => s.render(w, screen, palette),
         }
@@ -177,6 +183,7 @@ impl Overlay {
             Overlay::Confirm(o) => o.handle_key(key),
             Overlay::Goto(o) => o.handle_key(key),
             Overlay::Add(o) => o.handle_key(key),
+            Overlay::Sort(o) => o.handle_key(key),
             #[cfg(test)]
             Overlay::Stub(s) => s.handle_key(key),
         }
@@ -191,6 +198,7 @@ impl Overlay {
             Overlay::Confirm(o) => o.handle_mouse(ev),
             Overlay::Goto(o) => o.handle_mouse(ev),
             Overlay::Add(o) => o.handle_mouse(ev),
+            Overlay::Sort(o) => o.handle_mouse(ev),
             #[cfg(test)]
             Overlay::Stub(s) => s.handle_mouse(ev),
         }

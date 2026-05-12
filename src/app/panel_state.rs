@@ -24,6 +24,48 @@ use {
     },
 };
 
+/// Hard cap on the file size that `:copy_file_content` will read into
+/// memory and push to the clipboard. The clipboard is for short, mostly
+/// text payloads; loading multi-GB files would freeze the UI and most
+/// clipboard backends would refuse them anyway. 10 MiB is generous for
+/// configs, sources, and notes while still well below any sane backend
+/// limit.
+#[cfg(feature = "clipboard")]
+const MAX_COPY_FILE_CONTENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Read a regular file's UTF-8 contents for `:copy_file_content`,
+/// enforcing the size cap and rejecting directories / non-UTF-8 bytes.
+///
+/// Extracted from the `on_internal_generic` arm so the validation
+/// branches can be unit-tested without going through the live
+/// clipboard backend (whose side effects are deliberately out of
+/// scope for unit tests).
+#[cfg(feature = "clipboard")]
+fn read_file_content_for_clipboard(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("Cannot stat file: {}", e))?;
+    if !metadata.is_file() {
+        return Err("Selection is not a regular file".to_string());
+    }
+    if metadata.len() > MAX_COPY_FILE_CONTENT_BYTES {
+        return Err("File too large to copy as text".to_string());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("Cannot read file: {}", e))?;
+    String::from_utf8(bytes).map_err(|_| "Binary content, cannot copy as text".to_string())
+}
+
+/// Extract the file name from a path for `:copy_name`. Returns
+/// `Err("Selection has no file name")` when `Path::file_name()`
+/// returns `None` (e.g. the path ends in `..` or is the filesystem
+/// root). Pulled out so the no-file-name branch can be unit-tested
+/// without going through the live clipboard backend.
+#[cfg(feature = "clipboard")]
+fn file_name_for_clipboard(path: &Path) -> Result<String, String> {
+    match path.file_name() {
+        Some(name) => Ok(name.to_string_lossy().to_string()),
+        None => Err("Selection has no file name".to_string()),
+    }
+}
+
 /// a panel state, stackable to allow reverting
 ///  to a previous one
 pub trait PanelState {
@@ -135,7 +177,7 @@ pub trait PanelState {
                 }
             }
             Internal::back => CmdResult::PopState,
-            Internal::copy_line | Internal::copy_path => {
+            Internal::copy_line | Internal::copy_path | Internal::copy_name => {
                 #[cfg(not(feature = "clipboard"))]
                 {
                     CmdResult::error("Clipboard feature not enabled at compilation")
@@ -143,10 +185,39 @@ pub trait PanelState {
                 #[cfg(feature = "clipboard")]
                 {
                     if let Some(path) = self.selected_path() {
-                        let path = path.to_string_lossy().to_string();
-                        match terminal_clipboard::set_string(path) {
+                        let to_copy = if internal_exec.internal == Internal::copy_name {
+                            match file_name_for_clipboard(path) {
+                                Ok(name) => name,
+                                Err(msg) => return Ok(CmdResult::error(msg)),
+                            }
+                        } else {
+                            path.to_string_lossy().to_string()
+                        };
+                        match terminal_clipboard::set_string(to_copy) {
                             Ok(()) => CmdResult::Keep,
                             Err(_) => CmdResult::error("Clipboard error while copying path"),
+                        }
+                    } else {
+                        CmdResult::error("Nothing to copy")
+                    }
+                }
+            }
+            Internal::copy_file_content => {
+                #[cfg(not(feature = "clipboard"))]
+                {
+                    CmdResult::error("Clipboard feature not enabled at compilation")
+                }
+                #[cfg(feature = "clipboard")]
+                {
+                    if let Some(path) = self.selected_path() {
+                        match read_file_content_for_clipboard(path) {
+                            Ok(content) => match terminal_clipboard::set_string(content) {
+                                Ok(()) => CmdResult::Keep,
+                                Err(_) => {
+                                    CmdResult::error("Clipboard error while copying content")
+                                }
+                            },
+                            Err(msg) => CmdResult::error(msg),
                         }
                     } else {
                         CmdResult::error("Nothing to copy")
@@ -634,6 +705,10 @@ pub trait PanelState {
             Internal::escape => CmdResult::HandleInApp(Internal::escape),
             Internal::bookmarks => {
                 let overlay = Overlay::Goto(GotoOverlay::new(cc.app.con.bookmarks.clone()));
+                CmdResult::OpenOverlay(Box::new(overlay))
+            }
+            Internal::open_sort_overlay => {
+                let overlay = Overlay::Sort(SortOverlay::new());
                 CmdResult::OpenOverlay(Box::new(overlay))
             }
             Internal::focus_staging_area_no_open => {
@@ -1427,6 +1502,133 @@ mod frame_title_tests {
             "Filesystems"
         );
         assert_eq!(default_frame_title_for_type(PanelStateType::Tree), "Tree");
+    }
+}
+
+#[cfg(all(test, feature = "clipboard"))]
+mod copy_file_content_tests {
+    use super::*;
+
+    /// `:copy_file_content` refuses directory selections — the
+    /// clipboard is for byte content, not directory listings.
+    #[test]
+    fn directory_selection_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = read_file_content_for_clipboard(tmp.path()).expect_err("dir must error");
+        assert_eq!(err, "Selection is not a regular file");
+    }
+
+    /// Files larger than `MAX_COPY_FILE_CONTENT_BYTES` are rejected
+    /// without being read. We test with the cap + 1 byte to pin the
+    /// boundary; a sparse file via `set_len` keeps the test fast.
+    #[test]
+    fn oversized_file_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("huge.txt");
+        let f = fs::File::create(&path).expect("create file");
+        f.set_len(MAX_COPY_FILE_CONTENT_BYTES + 1).expect("set_len");
+        drop(f);
+        let err = read_file_content_for_clipboard(&path).expect_err("oversize must error");
+        assert_eq!(err, "File too large to copy as text");
+    }
+
+    /// Non-UTF-8 bytes are rejected — the clipboard contract is text,
+    /// not arbitrary binary.
+    #[test]
+    fn non_utf8_file_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("binary.bin");
+        fs::write(&path, [0xFF, 0xFE, 0xFD]).expect("write");
+        let err = read_file_content_for_clipboard(&path).expect_err("non-utf8 must error");
+        assert_eq!(err, "Binary content, cannot copy as text");
+    }
+
+    /// Happy path: a small UTF-8 file's contents come back verbatim.
+    #[test]
+    fn small_utf8_file_returns_contents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hello.txt");
+        let contents = "hello, broot\n";
+        fs::write(&path, contents).expect("write");
+        let got = read_file_content_for_clipboard(&path).expect("happy path");
+        assert_eq!(got, contents);
+    }
+
+    /// A non-existent path fails at the metadata stage. The error
+    /// surfaces as "Cannot stat file: ..." (distinct from the post-
+    /// metadata "Cannot read file" path) so users can tell whether
+    /// the failure was the stat or the read.
+    #[test]
+    fn missing_path_surfaces_stat_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.txt");
+        let err = read_file_content_for_clipboard(&path)
+            .expect_err("missing path must error");
+        assert!(
+            err.starts_with("Cannot stat file:"),
+            "expected `Cannot stat file:` prefix, got {err:?}",
+        );
+    }
+
+    /// A zero-byte UTF-8 file is valid: the empty string is the
+    /// content. Pins the boundary; an off-by-one in the cap check
+    /// (e.g. `>=` instead of `>`) would surface as a regression here.
+    #[test]
+    fn zero_byte_file_returns_empty_string() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("empty.txt");
+        fs::write(&path, []).expect("write");
+        let got = read_file_content_for_clipboard(&path).expect("zero bytes is valid");
+        assert_eq!(got, "");
+    }
+
+    /// `:copy_name` extracts the path's final component. A regular
+    /// file gets its base name back.
+    #[test]
+    fn copy_name_returns_file_name() {
+        let path = PathBuf::from("/etc/hosts");
+        let got = file_name_for_clipboard(&path).expect("ok");
+        assert_eq!(got, "hosts");
+    }
+
+    /// Paths that don't have a final component (e.g. ending in `..`
+    /// after path normalization, or the filesystem root `/`) surface
+    /// an explicit "Selection has no file name" error rather than
+    /// returning an empty string. We exercise the explicit `..` form
+    /// since it doesn't depend on the host filesystem layout.
+    #[test]
+    fn copy_name_on_dotdot_path_errors() {
+        let path = PathBuf::from("..");
+        let err = file_name_for_clipboard(&path).expect_err("`..` has no file name");
+        assert_eq!(err, "Selection has no file name");
+    }
+
+    /// The filesystem root has no file_name either.
+    #[test]
+    fn copy_name_on_root_path_errors() {
+        let path = PathBuf::from("/");
+        let err = file_name_for_clipboard(&path).expect_err("/ has no file name");
+        assert_eq!(err, "Selection has no file name");
+    }
+
+    /// A file at exactly `MAX_COPY_FILE_CONTENT_BYTES` (10 MiB) is
+    /// accepted; the cap check is `metadata.len() > MAX` so equality
+    /// passes through. We don't assert on the contents (a 10 MiB
+    /// sparse zero-byte file is not valid UTF-8 unless every byte
+    /// is a NUL — which is valid UTF-8 — so the read succeeds).
+    /// What this test pins is the size-check boundary: 10 MiB + 1
+    /// is already covered by `oversized_file_is_rejected`; this
+    /// covers the other side of the inequality.
+    #[test]
+    fn file_at_exact_cap_is_accepted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("at-cap.txt");
+        let f = fs::File::create(&path).expect("create file");
+        f.set_len(MAX_COPY_FILE_CONTENT_BYTES).expect("set_len");
+        drop(f);
+        let got = read_file_content_for_clipboard(&path)
+            .expect("file at exactly the cap must be accepted");
+        assert_eq!(got.len() as u64, MAX_COPY_FILE_CONTENT_BYTES);
     }
 }
 

@@ -129,7 +129,7 @@ impl VerbStore {
             .with_condition(FileTypeCondition::Directory);
         self.add_internal(open_preview);
         self.add_internal(close_preview);
-        self.add_internal(toggle_preview);
+        self.add_internal(toggle_preview).with_key(key!(alt - p));
         self.add_internal(preview_image).with_shortcut("img");
         self.add_internal(preview_text).with_shortcut("txt");
         self.add_internal(preview_binary).with_shortcut("hex");
@@ -154,9 +154,13 @@ impl VerbStore {
         )
         .with_shortcut("cp");
         #[cfg(feature = "clipboard")]
+        self.add_internal(copy_file_content).with_key(key!(shift - y));
+        #[cfg(feature = "clipboard")]
         self.add_internal(copy_line).with_key(key!(alt - c));
         #[cfg(feature = "clipboard")]
-        self.add_internal(copy_path);
+        self.add_internal(copy_name).with_key(key!('c'));
+        #[cfg(feature = "clipboard")]
+        self.add_internal(copy_path).with_key(key!(shift - c));
         #[cfg(unix)]
         self.add_external(
             "copy_to_panel",
@@ -171,7 +175,7 @@ impl VerbStore {
             StayInBroot,
         )
         .with_shortcut("cpp");
-        self.add_internal(trash);
+        self.add_internal(trash).with_key(key!('d'));
         #[cfg(any(
             target_os = "windows",
             all(unix, not(any(target_os = "ios", target_os = "android")))
@@ -248,7 +252,9 @@ impl VerbStore {
         // bulk flow. The continuation `bulk_rename_apply` is NOT bound
         // to any key — it is only ever reached from the confirm
         // overlay's `CloseAndRun` path.
-        self.add_internal(bulk_rename).with_key(key!(f2));
+        self.add_internal(bulk_rename)
+            .with_key(key!(f2))
+            .with_key(key!('r'));
         self.add_internal(bulk_rename_apply).no_doc();
         #[cfg(unix)]
         self.add_external(
@@ -276,8 +282,11 @@ impl VerbStore {
             .with_key(key!('/'));
         self.add_internal(previous_match)
             .with_key(key!(shift - backtab))
-            .with_key(key!(backtab));
-        self.add_internal(next_match).with_key(key!(tab));
+            .with_key(key!(backtab))
+            .with_key(key!(shift - n));
+        self.add_internal(next_match)
+            .with_key(key!(tab))
+            .with_key(key!('n'));
         self.add_internal(no_sort).with_shortcut("ns");
         self.add_internal(open_stay)
             .with_key(key!(enter))
@@ -286,8 +295,11 @@ impl VerbStore {
         self.add_internal(parent)
             .with_key(key!(h))
             .with_shortcut("p");
-        self.add_internal(bookmarks).with_key(key!(alt - b));
+        self.add_internal(bookmarks)
+            .with_key(key!(alt - b))
+            .with_key(key!('b'));
         self.add_internal(add).with_key(key!(alt - n));
+        self.add_internal(open_sort_overlay).with_key(key!('o'));
         self.add_internal(page_down)
             .with_key(key!(ctrl - d))
             .with_key(key!(pagedown));
@@ -305,26 +317,39 @@ impl VerbStore {
         self.add_internal(quit)
             .with_key(key!(ctrl - c))
             .with_key(key!(ctrl - q))
+            .with_key(key!('q'))
             .with_shortcut("q");
-        self.add_internal(refresh).with_key(key!(f5));
+        self.add_internal(refresh)
+            .with_key(key!(f5))
+            .with_key(key!(shift - r));
         self.add_internal(root_up).with_key(key!(ctrl - up));
         self.add_internal(root_down).with_key(key!(ctrl - down));
-        self.add_internal(select_first);
-        self.add_internal(select_last);
+        self.add_internal(select_first).with_key(key!('g'));
+        self.add_internal(select_last).with_key(key!(shift - g));
         self.add_internal(select);
         self.add_internal(show);
         self.add_internal(clear_stage).with_shortcut("cls");
-        self.add_internal(copy_from_staging).with_shortcut("cfs");
-        self.add_internal(move_from_staging).with_shortcut("mfs");
+        self.add_internal(copy_from_staging)
+            .with_key(key!('y'))
+            .with_shortcut("cfs");
+        self.add_internal(move_from_staging)
+            .with_key(key!('x'))
+            .with_shortcut("mfs");
         self.add_internal(stage).with_key(key!('+'));
         self.add_internal(unstage).with_key(key!('-'));
         self.add_internal(stage_all_directories);
         self.add_internal(stage_all_files).with_key(key!(ctrl - a));
-        self.add_internal(toggle_stage).with_key(key!(ctrl - g));
+        self.add_internal(toggle_stage)
+            .with_key(key!(ctrl - g))
+            .with_key(key!('='));
         self.add_internal(open_staging_area).with_shortcut("osa");
         self.add_internal(close_staging_area).with_shortcut("csa");
-        self.add_internal(toggle_staging_area).with_shortcut("tsa");
-        self.add_internal(toggle_tree).with_shortcut("tree");
+        self.add_internal(toggle_staging_area)
+            .with_key(key!(alt - s))
+            .with_shortcut("tsa");
+        self.add_internal(toggle_tree)
+            .with_key(key!(alt - t))
+            .with_shortcut("tree");
         self.add_internal(toggle_watch)
             .with_shortcut("watch")
             .with_key(key!(alt - w));
@@ -332,17 +357,22 @@ impl VerbStore {
         self.add_internal(sort_by_date).with_shortcut("sd");
         self.add_internal(sort_by_size).with_shortcut("ss");
         self.add_internal(sort_by_type).with_shortcut("st");
+        self.add_internal(sort_by_type_dirs_first).with_shortcut("sdf");
+        self.add_internal(sort_by_type_dirs_last).with_shortcut("sdl");
         #[cfg(unix)]
         self.add_external("rm", "rm -rf {file}", StayInBroot)
-            .with_confirm(true);
+            .with_confirm(true)
+            .with_key(key!(shift - d));
         #[cfg(windows)]
         self.add_external("rm", "cmd /c rmdir /Q /S {file}", StayInBroot)
             .with_condition(FileTypeCondition::Directory)
-            .with_confirm(true);
+            .with_confirm(true)
+            .with_key(key!(shift - d));
         #[cfg(windows)]
         self.add_external("rm", "cmd /c del /Q {file}", StayInBroot)
             .with_condition(FileTypeCondition::File)
-            .with_confirm(true);
+            .with_confirm(true)
+            .with_key(key!(shift - d));
         self.add_internal(toggle_counts).with_shortcut("counts");
         self.add_internal(toggle_dates).with_shortcut("dates");
         self.add_internal(toggle_device_id).with_shortcut("dev");
@@ -351,12 +381,14 @@ impl VerbStore {
             .with_key(key!(alt - i))
             .with_shortcut("gi");
         self.add_internal(toggle_git_file_info).with_shortcut("gf");
-        self.add_internal(toggle_git_status).with_shortcut("gs");
+        self.add_internal(toggle_git_status)
+            .with_key(key!(alt - g))
+            .with_shortcut("gs");
         self.add_internal(toggle_root_fs).with_shortcut("rfs");
         self.add_internal(set_max_depth);
         self.add_internal(unset_max_depth);
         self.add_internal(toggle_hidden)
-            .with_key(key!(alt - h))
+            .with_key(key!(alt - '.'))
             .with_shortcut("h");
         #[cfg(unix)]
         self.add_internal(toggle_perm).with_shortcut("perm");
@@ -827,7 +859,8 @@ mod bulk_rename_routing_tests {
     /// additional per-verb filters: `can_be_called_in_panel`,
     /// `selection_condition`, and `file_extensions`. This test pins
     /// BOTH the registration order AND the filter shape so a future
-    /// change to either path keeps F2 routed to `Internal::bulk_rename`.
+    /// change to either path keeps F2 (and `r`) routed to
+    /// `Internal::bulk_rename`.
     ///
     /// Specifically, we assert that the first F2-bound verb has:
     ///   - registration order before the external `rename`
@@ -835,6 +868,12 @@ mod bulk_rename_routing_tests {
     ///   - `selection_condition` of `Any` (would otherwise skip the
     ///     no-selection case where the user opens F2 with the stage
     ///     populated but no tree selection)
+    ///
+    /// `r` is the Command-mode bare-letter alias for F2 (registered
+    /// alongside it on `Internal::bulk_rename`); since the external
+    /// `rename` verb does NOT bind `r`, the assertion that the first
+    /// `r`-bound verb is the internal also pins that no future
+    /// refactor accidentally moves `r` onto the external.
     #[test]
     fn f2_resolves_to_internal_bulk_rename_before_external_rename() {
         let mut conf = Conf::default();
@@ -868,6 +907,21 @@ mod bulk_rename_routing_tests {
              three filters in find_key_verb are selection_condition, \
              file_extensions, and panels — all three must be permissive)",
         );
+
+        // `r` (the Command-mode bare-letter alias) must also resolve
+        // to `Internal::bulk_rename`. Use the same first-in-registration-
+        // order resolution as `find_key_verb`.
+        let first_r_verb = store
+            .verbs()
+            .iter()
+            .find(|v| v.keys.contains(&key!('r')))
+            .expect("at least one verb must bind `r`");
+        assert_eq!(
+            first_r_verb.get_internal(),
+            Some(Internal::bulk_rename),
+            "`r` must resolve to Internal::bulk_rename first; \
+             check the registration order in add_builtin_verbs",
+        );
     }
 
     /// The continuation `bulk_rename_apply` is intentionally unbound:
@@ -889,6 +943,244 @@ mod bulk_rename_routing_tests {
         assert!(
             apply.keys.is_empty(),
             "bulk_rename_apply must not bind any key",
+        );
+    }
+}
+
+#[cfg(test)]
+mod vim_bindings_tests {
+    //! Pin tests for the bare-letter Command-mode bindings introduced
+    //! for the vim-style keymap. These verify that each binding is
+    //! attached to the right verb (internal name or external invocation),
+    //! so a future verb-store refactor can't silently drop a binding.
+    //!
+    //! Bare-letter keys fire only in Command mode by virtue of
+    //! `is_key_allowed_for_verb` (`src/command/panel_input.rs:414-427`),
+    //! which blocks bare-letter `KeyCombination`s while the input field
+    //! is active. No test in this module exercises that gate — it lives
+    //! in `panel_input.rs` and is covered by its own pin test.
+    use super::*;
+
+    /// Helper: find the first verb in registration order whose `keys`
+    /// list contains the given `KeyCombination`. Mirrors the
+    /// registration-order semantics that `find_key_verb` relies on,
+    /// minus the per-verb filters (which are exercised by the
+    /// `bulk_rename_routing_tests` module).
+    fn first_verb_for_key(
+        store: &VerbStore,
+        key: KeyCombination,
+    ) -> Option<&Verb> {
+        store.verbs().iter().find(|v| v.keys.contains(&key))
+    }
+
+    /// Table-driven check for the 13 always-on Command-mode bindings.
+    /// The set includes bare letters, shifted letters, and `=`. Each
+    /// row binds a `KeyCombination` to either an `Internal` (for
+    /// internal verbs) or to a verb name (for externals like `:rm`).
+    #[test]
+    fn vim_bindings_resolve() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+
+        // Internals — assert the first verb bound to each key is the
+        // expected internal. Note: crokey's `key!` macro lower-cases
+        // bare char literals (`key!('G')` is parsed as `Char('g')`
+        // with no shift modifier — see crokey-proc_macros 1.3.0).
+        // For uppercase letters we must use `key!(shift - g)` so the
+        // produced `KeyCombination` matches the SHIFT-normalized form
+        // that crossterm emits for `Shift+G`.
+        let internal_bindings: &[(KeyCombination, Internal)] = &[
+            (key!('r'), Internal::bulk_rename),
+            (key!('x'), Internal::move_from_staging),
+            (key!('o'), Internal::open_sort_overlay),
+            (key!('b'), Internal::bookmarks),
+            (key!('='), Internal::toggle_stage),
+            (key!('g'), Internal::select_first),
+            (key!(shift - g), Internal::select_last),
+            (key!('q'), Internal::quit),
+            (key!(shift - r), Internal::refresh),
+            (key!('n'), Internal::next_match),
+            (key!(shift - n), Internal::previous_match),
+            (key!('d'), Internal::trash),
+            // Vim-style navigation. `focus` is registered with
+            // `key!(L)` (uppercase-char form, no SHIFT modifier in
+            // the KeyCombination) — distinct from `key!(shift - l)`
+            // which would add SHIFT and not match.
+            (key!('j'), Internal::line_down),
+            (key!('k'), Internal::line_up),
+            (key!('h'), Internal::parent),
+            (key!(L), Internal::focus),
+        ];
+        for (key, expected) in internal_bindings {
+            let verb = first_verb_for_key(&store, *key).unwrap_or_else(|| {
+                panic!(
+                    "no verb bound to key {:?} (expected {:?})",
+                    key, expected,
+                )
+            });
+            assert_eq!(
+                verb.get_internal(),
+                Some(*expected),
+                "key {:?} should resolve to internal {:?}, got {:?}",
+                key,
+                expected,
+                verb.get_internal(),
+            );
+            // Filter-shape assertion: bare-letter bindings must be
+            // permissive enough that `find_key_verb` doesn't skip
+            // past them. A future `.with_condition(...)`, a
+            // `.with_panel(...)`, or a `file_extensions` entry on
+            // these verbs would silently break the binding without
+            // tripping the get_internal check above. Pin the three
+            // filters that `find_key_verb` consults.
+            assert!(
+                matches!(verb.selection_condition, FileTypeCondition::Any),
+                "verb for key {:?} must accept any selection \
+                 (selection_condition == Any) — got {:?}",
+                key,
+                verb.selection_condition,
+            );
+            assert!(
+                verb.file_extensions.is_empty(),
+                "verb for key {:?} must not restrict by file extension",
+                key,
+            );
+            assert!(
+                verb.panels.is_empty(),
+                "verb for key {:?} must not restrict to specific panels",
+                key,
+            );
+        }
+
+        // External `:rm` (the only external in the bare-letter set).
+        let d_upper_verb = first_verb_for_key(&store, key!(shift - d))
+            .expect("shift-D must be bound");
+        assert!(
+            d_upper_verb.has_name("rm"),
+            "shift-D should resolve to the external `rm` verb",
+        );
+    }
+
+    /// Clipboard-gated bindings: these four verbs are only registered
+    /// when the `clipboard` feature is enabled. Their key bindings live
+    /// alongside the registrations and so are also feature-gated.
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn vim_bindings_resolve_clipboard() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let bindings: &[(KeyCombination, Internal)] = &[
+            (key!('y'), Internal::copy_from_staging),
+            (key!(shift - y), Internal::copy_file_content),
+            (key!('c'), Internal::copy_name),
+            (key!(shift - c), Internal::copy_path),
+        ];
+        for (key, expected) in bindings {
+            let verb = first_verb_for_key(&store, *key).unwrap_or_else(|| {
+                panic!(
+                    "no verb bound to key {:?} (expected {:?})",
+                    key, expected,
+                )
+            });
+            assert_eq!(
+                verb.get_internal(),
+                Some(*expected),
+                "key {:?} should resolve to internal {:?}, got {:?}",
+                key,
+                expected,
+                verb.get_internal(),
+            );
+        }
+    }
+
+    /// Table-driven check for the 6 alt-modifier bindings on the
+    /// panel-toggle internals. Alt-modifier bindings work in both Input
+    /// and Command modes (alt-* keys bypass `is_key_only_modal`), so
+    /// these are always live regardless of `modal:` config.
+    #[test]
+    fn vim_alt_bindings_resolve() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+
+        let bindings: &[(KeyCombination, Internal)] = &[
+            (key!(alt - '.'), Internal::toggle_hidden),
+            (key!(alt - g), Internal::toggle_git_status),
+            (key!(alt - i), Internal::toggle_ignore),
+            (key!(alt - s), Internal::toggle_staging_area),
+            (key!(alt - p), Internal::toggle_preview),
+            (key!(alt - t), Internal::toggle_tree),
+            (key!(alt - b), Internal::bookmarks),
+            (key!(alt - n), Internal::add),
+        ];
+        for (key, expected) in bindings {
+            let verb = first_verb_for_key(&store, *key).unwrap_or_else(|| {
+                panic!(
+                    "no verb bound to key {:?} (expected {:?})",
+                    key, expected,
+                )
+            });
+            assert_eq!(
+                verb.get_internal(),
+                Some(*expected),
+                "key {:?} should resolve to internal {:?}, got {:?}",
+                key,
+                expected,
+                verb.get_internal(),
+            );
+        }
+    }
+
+    /// Pin test: `alt-h` was previously bound to `toggle_hidden`, but
+    /// the vim keymap moved that binding to `alt-.` so that `h` (and
+    /// alt-h variants in some configs) can be used for navigation /
+    /// other purposes. This test ensures no verb in the store carries
+    /// `alt-h` in its keys list, catching an accidental re-add of the
+    /// old binding via a future refactor or merge.
+    #[test]
+    fn alt_h_no_longer_resolves_to_toggle_hidden() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let alt_h = key!(alt - h);
+        for verb in store.verbs() {
+            assert!(
+                !verb.keys.contains(&alt_h),
+                "verb {:?} still has alt-h in its keys list; the vim \
+                 keymap migrated this binding to alt-. on toggle_hidden",
+                verb.names,
+            );
+        }
+    }
+
+    /// Pin test: the two `sort_by_type_dirs_*` internals must be
+    /// registered as verbs so the sort overlay's `f` / `l` keystrokes
+    /// (which re-dispatch via `Command::from_raw(":sort_by_type_dirs_first")`
+    /// and `:sort_by_type_dirs_last`) actually resolve to a verb and
+    /// run the sort. Without registration, the apply path would set
+    /// the status row to "verb not found" and the sort would silently
+    /// never apply.
+    #[test]
+    fn sort_by_type_dirs_internals_registered() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let first = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::sort_by_type_dirs_first))
+            .expect("sort_by_type_dirs_first must be registered");
+        assert!(
+            first.has_name("sort_by_type_dirs_first"),
+            "sort_by_type_dirs_first must be invocable by name (\
+             SortOverlay's `f` key dispatches via name)",
+        );
+        let last = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::sort_by_type_dirs_last))
+            .expect("sort_by_type_dirs_last must be registered");
+        assert!(
+            last.has_name("sort_by_type_dirs_last"),
+            "sort_by_type_dirs_last must be invocable by name (\
+             SortOverlay's `l` key dispatches via name)",
         );
     }
 }

@@ -39,8 +39,8 @@ test in `frame.rs` will keep passing because it only checks glyph bytes.
 `App::overlay: Option<Overlay>` (`src/app/app.rs:81`) is the only
 floating-modal state. Do not introduce a parallel flag or a stack —
 the variants of `Overlay` (`src/app/overlay/mod.rs:127-137`,
-currently `Confirm`, `Goto`, `Add`, plus a test-only `Stub`) cover
-every floating-modal need we have, and the rest of the routing
+currently `Confirm`, `Goto`, `Add`, `Sort`, plus a test-only `Stub`)
+cover every floating-modal need we have, and the rest of the routing
 assumes "at most one".
 
 Render hook: `display_panels` post-passes the overlay after every panel
@@ -500,8 +500,65 @@ deliberately not width-gated: a click on that edge still selects the
 root, matching the "top edge is the root's seat" intent. Those panels
 are pathological at that width anyway.
 
-Four production call sites pass the `selected` arg: the panel render
+Five production call sites pass the `selected` arg: the panel render
 in `src/app/app_panels.rs:712` forwards `panel.state().title_selected()`;
-the three overlay renderers (`src/app/overlay/goto.rs:195`,
-`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:244`) always
-pass `false` — overlays have no selectable root.
+the four overlay renderers (`src/app/overlay/goto.rs:195`,
+`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:244`,
+`src/app/overlay/sort.rs:150`) always pass `false` — overlays have no
+selectable root.
+
+### Sort overlay — `Internal::open_sort_overlay` / `SortOverlay`
+
+`SortOverlay` is stateless (unit struct at `src/app/overlay/sort.rs`).
+The overlay is opened by `Internal::open_sort_overlay` (bound to `o`
+in Command mode) and presents the seven sort modes as single-key
+shortcuts; `handle_key` returns `OverlayOutcome::CloseAndRun` carrying
+a synthesized `:sort_by_*` (or `:no_sort`) command that the App
+re-dispatches through `apply_command`.
+
+The `:sort_by_*` family of verbs are NOT in the bulk-stage
+deny-list (`is_stage_consuming_internal` at `src/app/app.rs:1310`)
+because they don't iterate the stage — they mutate the active panel's
+tree options. Any future sort-related internal that DOES consume the
+stage must be added to that deny-list, mirroring the rule for
+new stage-consuming internals documented in the "Verb confirmation
+system" section.
+
+The `f` and `l` shortcuts dispatch via name strings
+(`":sort_by_type_dirs_first"`, `":sort_by_type_dirs_last"`); both
+internals must therefore be registered in `add_builtin_verbs`
+(`src/verb/verb_store.rs`, alongside the other `sort_by_*` entries).
+The `sort_by_type_dirs_internals_registered` pin test in the
+`vim_bindings_tests` module catches accidental deregistration —
+without that, the overlay's `f`/`l` keys would silently fail with
+"verb not found" in the status row.
+
+## `:copy_file_content` size cap
+
+`MAX_COPY_FILE_CONTENT_BYTES` (`src/app/panel_state.rs:34`) is a
+10 MiB hard cap on the file size that `:copy_file_content`
+(bound to `Y` in Command mode, clipboard feature only) will read
+into memory and push to the clipboard. The cap is enforced in
+`read_file_content_for_clipboard`; the three rejection conditions
+are:
+
+- selection is not a regular file (directory, symlink target gone,
+  etc.) → `"Selection is not a regular file"`
+- file size strictly greater than the cap →
+  `"File too large to copy as text"`
+- contents are not valid UTF-8 → `"Binary content, cannot copy as text"`
+
+The cap is pragmatic, not arbitrary: clipboard backends typically
+refuse multi-MB payloads (or freeze the UI parsing them), and the
+overwhelming majority of clipboard-as-text use cases are configs,
+source files, and notes — all well under 10 MiB. There is no
+configuration knob; users who need a different cap edit the const.
+
+The size check uses `>` so a file at exactly the cap is accepted;
+the stat-vs-read distinction is preserved in the error messages
+(`"Cannot stat file:"` vs `"Cannot read file:"`) so users can
+tell which phase failed. A small TOCTOU window exists between the
+metadata size check and `fs::read`: a file that grows between the
+two calls can exceed the cap by a small amount. This is documented
+and accepted — closing the window would require streaming with a
+running byte counter, which is out of proportion for the use case.

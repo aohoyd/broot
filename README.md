@@ -37,7 +37,7 @@ That's what makes it usable, where the old `tree` command would produce pages of
 
 `.gitignore` files are properly dealt with to put unwanted files out of your way.
 
-As you sometimes want to see gitignored files, or hidden ones, you'll soon get used to the <kbd>alt</kbd><kbd>i</kbd> and <kbd>alt</kbd><kbd>h</kbd> shortcuts to toggle those visibilities.
+As you sometimes want to see gitignored files, or hidden ones, you'll soon get used to the <kbd>alt</kbd><kbd>i</kbd> and <kbd>alt</kbd><kbd>.</kbd> shortcuts to toggle those visibilities.
 
 (you can ignore them though, see [documentation](https://dystroy.org/broot/navigation/#toggles)).
 
@@ -60,7 +60,7 @@ Most useful keys for this:
 * <kbd>esc</kbd> to get back to the previous state or clear your search (also walks up to the parent when the search is empty)
 * <kbd class=b>↓</kbd> and <kbd class=b>↑</kbd> may be used to move the selection
 * <kbd>alt</kbd><kbd>enter</kbd> to get back to the shell, having `cd` to the selected directory
-* <kbd>alt</kbd><kbd>h</kbd> to toggle showing hidden files (the ones whose name starts with a dot)
+* <kbd>alt</kbd><kbd>.</kbd> to toggle showing hidden files (the ones whose name starts with a dot)
 * <kbd>alt</kbd><kbd>i</kbd> to toggle showing gitignored files
 * `:q` if you just want to quit (you can use <kbd>ctrl</kbd><kbd>q</kbd> if you prefer)
 
@@ -142,6 +142,54 @@ but `h` from the tree still triggers `:parent`).
 Customize the bookmark list with a `bookmarks` block in `conf.hjson`
 — see the commented example near the top of the default config.
 
+## Command mode (vim-like) bindings
+
+Set `modal: true` in `conf.hjson` to enable Command mode (where bare
+letters trigger verbs instead of filtering the tree). Bare-letter
+bindings below are active only in Command mode; alt-modifier bindings
+work in both modes. Without `modal: true`, pressing a bare letter
+starts a fuzzy filter rather than triggering the listed action.
+
+Bare letters (Command mode only):
+
+| Key | Action |
+|---|---|
+| `j` / `k` | move selection down / up |
+| `h` | go to parent directory |
+| `L` | focus selection (enter directory or open file) |
+| `r` | open rename / bulk rename |
+| `d` | `:trash` (recoverable — sends to platform trash) |
+| `D` | `:rm` (permanent delete — confirm required) |
+| `y` / `x` | copy / move from staging |
+| `c` / `C` | copy file name / full path to clipboard (requires `clipboard` build feature) |
+| `Y` | copy file content to clipboard (text files, ≤10 MiB; requires `clipboard` build feature) |
+| `o` | open the sort overlay |
+| `b` | open the bookmarks overlay |
+| `g` / `G` | jump to first / last entry |
+| `n` / `N` | next / previous match |
+| `q` | quit |
+| `R` | refresh |
+| `=` | toggle staging of selection |
+
+Alt-modifier (both modes):
+
+| Key | Action |
+|---|---|
+| <kbd>alt</kbd><kbd>.</kbd> | toggle hidden files (replaces former alt-h) |
+| <kbd>alt</kbd><kbd>i</kbd> | toggle gitignored files |
+| <kbd>alt</kbd><kbd>g</kbd> | toggle git status column |
+| <kbd>alt</kbd><kbd>s</kbd> | toggle staging area panel |
+| <kbd>alt</kbd><kbd>p</kbd> | toggle preview panel |
+| <kbd>alt</kbd><kbd>t</kbd> | toggle tree visibility |
+
+Pressing `o` opens a single-key sort overlay: `s` size, `d` date,
+`c` count, `t` type, `f` type (dirs first), `l` type (dirs last),
+`n` none.
+
+**Breaking change:** <kbd>alt</kbd><kbd>h</kbd> no longer toggles
+hidden files — use <kbd>alt</kbd><kbd>.</kbd>. Re-bind in
+`conf.hjson` if you prefer the old key.
+
 ### Icons — breaking change in this release
 
 Nerd Font icons are **on by default**. Earlier broot versions
@@ -210,7 +258,7 @@ If you want to display *sizes*, *dates*, and *permissions*, do `br -sdp` which g
 
 You may also toggle options with a few keystrokes while inside broot.
 For example, you could have typed this `-sdp` while in broot.
-Or hit <kbd>alt</kbd><kbd>h</kbd> and you see hidden files.
+Or hit <kbd>alt</kbd><kbd>.</kbd> and you see hidden files.
 
 ## Sort, see what takes space:
 

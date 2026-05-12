@@ -222,14 +222,12 @@ impl App {
         if let Some(internal) = resolved_internal(cmd, con) {
             match internal {
                 Internal::bulk_rename => {
-                    info!("TEMP-DEBUG intercept: Internal::bulk_rename fired, cmd={cmd:?}"); // TEMP-DEBUG
                     if is_input_invocation {
                         self.panels.clear_input_invocation(con);
                     }
                     return self.run_bulk_rename(w, panel_skin, app_state, con);
                 }
                 Internal::bulk_rename_apply => {
-                    info!("TEMP-DEBUG intercept: Internal::bulk_rename_apply fired, cmd={cmd:?}, skip_confirm-was-just-cleared, overlay.is_some()={}, pending_bulk_rename.is_some()={}", self.overlay.is_some(), self.pending_bulk_rename.is_some()); // TEMP-DEBUG
                     if is_input_invocation {
                         self.panels.clear_input_invocation(con);
                     }
@@ -736,7 +734,6 @@ impl App {
         con: &mut AppContext,
     ) -> Result<(), ProgramError> {
         let stage_paths = app_state.stage.paths().to_vec();
-        info!("TEMP-DEBUG run_bulk_rename: enter, stage_paths.len()={}", stage_paths.len()); // TEMP-DEBUG
         if stage_paths.len() < 2 {
             // Fall through to the inline rename external verb. We
             // resolve it by name and synthesize a `Command::VerbTrigger`
@@ -759,29 +756,22 @@ impl App {
         }
 
         let content = bulk_rename::serialize(&stage_paths);
-        info!("TEMP-DEBUG run_bulk_rename: about to call edit_in_external"); // TEMP-DEBUG
         let edited = match editor::edit_in_external(&content, ".broot-rename") {
             Ok(s) => s,
             Err(e) => {
-                info!("TEMP-DEBUG run_bulk_rename: editor returned Err: {e}"); // TEMP-DEBUG
                 self.panels.mut_panel().set_error(format!("bulk rename: {e}"));
                 return Ok(());
             }
         };
-        info!("TEMP-DEBUG run_bulk_rename: editor returned Ok, edited.len()={}", edited.len()); // TEMP-DEBUG
         let parsed = bulk_rename::parse(&edited);
-        info!("TEMP-DEBUG run_bulk_rename: parsed.len()={}", parsed.len()); // TEMP-DEBUG
         let run = match bulk_rename::plan(&stage_paths, &parsed, &|p| p.exists()) {
             Ok(r) => r,
             Err(e) => {
-                info!("TEMP-DEBUG run_bulk_rename: plan returned Err: {e}"); // TEMP-DEBUG
                 self.panels.mut_panel().set_error(e.to_string());
                 return Ok(());
             }
         };
-        info!("TEMP-DEBUG run_bulk_rename: plan ok, run.renames.len()={}", run.renames.len()); // TEMP-DEBUG
         if run.renames.is_empty() {
-            info!("TEMP-DEBUG run_bulk_rename: no changes, returning"); // TEMP-DEBUG
             self.panels.mut_panel().set_message("bulk rename: no changes");
             return Ok(());
         }
@@ -793,7 +783,6 @@ impl App {
         } else {
             format!("Rename {count} files?")
         };
-        info!("TEMP-DEBUG run_bulk_rename: about to set pending and request_confirm; body={body:?}"); // TEMP-DEBUG
         self.pending_bulk_rename = Some(run);
         self.request_confirm(
             title,
@@ -801,11 +790,6 @@ impl App {
             "Rename",
             false,
             Command::from_raw(":bulk_rename_apply".to_string(), true),
-        );
-        info!( // TEMP-DEBUG
-            "TEMP-DEBUG run_bulk_rename: request_confirm returned, overlay.is_some()={}, pending_bulk_rename.is_some()={}",
-            self.overlay.is_some(),
-            self.pending_bulk_rename.is_some(),
         );
         Ok(())
     }
@@ -879,7 +863,6 @@ impl App {
         app_state: &mut AppState,
         con: &mut AppContext,
     ) -> Result<(), ProgramError> {
-        info!("TEMP-DEBUG handle_overlay_outcome: outcome={:?}", &outcome); // TEMP-DEBUG
         match outcome {
             OverlayOutcome::Stay => {}
             OverlayOutcome::Close => {
@@ -1036,19 +1019,14 @@ impl App {
                     if self.overlay.is_some()
                         && !matches!(event.event, Event::Resize(_, _))
                     {
-                        info!("TEMP-DEBUG overlay-dispatch: overlay active, event={:?}", &event.event); // TEMP-DEBUG
                         let outcome = if let Some(key) = event.key_combination {
-                            info!("TEMP-DEBUG overlay-dispatch: key event {key}"); // TEMP-DEBUG
                             self.overlay.as_mut().map(|ov| ov.handle_key(key))
                         } else if let Event::Mouse(mev) = event.event {
-                            info!("TEMP-DEBUG overlay-dispatch: mouse event {mev:?}"); // TEMP-DEBUG
                             self.overlay.as_mut().map(|ov| ov.handle_mouse(mev))
                         } else {
-                            info!("TEMP-DEBUG overlay-dispatch: unknown event, returning Stay"); // TEMP-DEBUG
                             Some(OverlayOutcome::Stay)
                         };
                         if let Some(outcome) = outcome {
-                            info!("TEMP-DEBUG overlay-dispatch: outcome={:?}", &outcome); // TEMP-DEBUG
                             self.handle_overlay_outcome(
                                 w,
                                 outcome,
@@ -1890,6 +1868,9 @@ mod confirm_helper_tests {
             Internal::add,
             Internal::focus,
             Internal::copy_path,
+            Internal::open_sort_overlay,
+            Internal::copy_name,
+            Internal::copy_file_content,
         ] {
             assert!(
                 !is_stage_consuming_internal(internal),

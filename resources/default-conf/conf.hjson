@@ -103,9 +103,9 @@ icon_theme: nerdfont
 
 ###############################################################
 # Bookmarks (Goto modal)
-# Pressing the `g` key opens the bookmarks goto modal. Each entry
-# binds a single character to a path. Inside the modal, hit the
-# bound key to jump straight to that location.
+# Pressing `alt-b` (or `b` in Command mode) opens the bookmarks
+# modal. Each entry binds a single character to a path. Inside the
+# modal, hit the bound key to jump straight to that location.
 #
 # `~`, ${HOME}, and ${XDG_CONFIG_HOME} are expanded.
 # `trash://` resolves to the platform trash directory.

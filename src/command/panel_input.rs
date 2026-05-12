@@ -547,3 +547,83 @@ impl PanelInput {
         Command::None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pin tests for the Mode::Command-vs-Mode::Input gating at the
+    //! `is_key_only_modal` boundary. `is_key_allowed_for_verb` consults
+    //! `keys::is_key_only_modal` for every non-arrow key: in Mode::Input
+    //! a "modal-only" key is dropped (so it can't reach the verb lookup
+    //! and falls through to filter input); in Mode::Command every key
+    //! is allowed. These tests lock in which keys are modal-only so a
+    //! refactor of `is_key_only_modal` can't silently regress the vim
+    //! bindings (Task 5) or the always-available alt-modifier verbs.
+    //!
+    //! The tests exercise `is_key_only_modal` directly rather than
+    //! going through `is_key_allowed_for_verb`. `is_key_allowed_for_verb`
+    //! is a method on `PanelInput`, whose constructor pulls in
+    //! `InputField`, terminal geometry, and the full `AppContext`/
+    //! `AppPanels` graph — mocking that for a gating test costs more
+    //! than the coverage delta. The Mode::Input arm of
+    //! `is_key_allowed_for_verb` is a one-liner (`!is_key_only_modal(key)`
+    //! gated on `match mode`), so a pin on `is_key_only_modal` is
+    //! equivalent to a pin on the gating function for all keys outside
+    //! the two cursor-movement arms (`key!(left)` / `key!(right)`).
+    use {
+        crate::keys,
+        crokey::key,
+    };
+
+    // Bare letters are modal-only: Mode::Input drops them; only
+    // Mode::Command lets them reach the verb lookup.
+
+    #[test]
+    fn bare_letter_r_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('r')));
+    }
+
+    #[test]
+    fn bare_letter_d_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('d')));
+    }
+
+    #[test]
+    fn bare_letter_g_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('g')));
+    }
+
+    #[test]
+    fn bare_letter_q_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('q')));
+    }
+
+    /// Shifted-letter keys (terminals emit these with KeyModifiers::SHIFT
+    /// + the upper-case Char) are ALSO modal-only — they would otherwise
+    /// fall through to filter input in Mode::Input and produce a typed
+    /// upper-case letter rather than firing the bound verb. Pins
+    /// shift-G (jump-to-last) as the representative case; the same
+    /// gate applies to shift-N, shift-R, shift-D, etc.
+    #[test]
+    fn shifted_letter_g_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!(shift - g)));
+    }
+
+    // alt-modifier keys are NOT modal-only: they're allowed in both
+    // Mode::Input and Mode::Command, so they never get sent to filter
+    // input.
+
+    #[test]
+    fn alt_dot_allowed_in_both_modes() {
+        assert!(!keys::is_key_only_modal(key!(alt - '.')));
+    }
+
+    #[test]
+    fn alt_g_allowed_in_both_modes() {
+        assert!(!keys::is_key_only_modal(key!(alt - g)));
+    }
+
+    #[test]
+    fn alt_s_allowed_in_both_modes() {
+        assert!(!keys::is_key_only_modal(key!(alt - s)));
+    }
+}
