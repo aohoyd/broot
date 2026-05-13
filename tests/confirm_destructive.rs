@@ -216,14 +216,14 @@ fn trash_overlay() -> ConfirmOverlay {
 }
 
 #[test]
-fn rm_overlay_opens_with_cancel_focused() {
-    // Behavioural pin: default focus must be Cancel — an Enter on a
-    // freshly-built overlay must NOT execute the pending command.
+fn rm_overlay_opens_with_confirm_focused() {
+    // Behavioural pin: default focus is the action button — Enter on a
+    // freshly-built overlay must execute the pending command.
     let mut o = rm_overlay();
     let outcome = o.handle_key(key!(enter));
     assert!(
-        matches!(outcome, OverlayOutcome::Close),
-        "default focus must be Cancel; Enter on first open must close, got {outcome:?}",
+        matches!(outcome, OverlayOutcome::CloseAndRun(_)),
+        "default focus must be Confirm; Enter on first open must run pending, got {outcome:?}",
     );
 }
 
@@ -264,21 +264,22 @@ fn esc_cancels_destructive_overlay() {
 }
 
 #[test]
-fn enter_on_default_focus_cancels() {
-    // Default focus is Cancel — an absent-minded Enter must NOT
-    // execute the destructive action.
+fn enter_on_default_focus_runs_pending() {
+    // Default focus is the action button — Enter executes the pending
+    // command without an explicit `y`.
     let mut o = rm_overlay();
     let outcome = o.handle_key(key!(enter));
-    assert!(matches!(outcome, OverlayOutcome::Close));
+    assert!(matches!(outcome, OverlayOutcome::CloseAndRun(_)));
 }
 
 #[test]
-fn enter_on_confirm_runs_pending() {
-    // Tab to flip focus to Confirm, then Enter must execute.
+fn enter_on_cancel_focus_closes() {
+    // Tab flips focus from Confirm to Cancel; Enter must then close
+    // without executing the pending command.
     let mut o = rm_overlay();
     let _ = o.handle_key(key!(tab));
     let outcome = o.handle_key(key!(enter));
-    assert!(matches!(outcome, OverlayOutcome::CloseAndRun(_)));
+    assert!(matches!(outcome, OverlayOutcome::Close));
 }
 
 // =============================================================================

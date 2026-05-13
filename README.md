@@ -176,21 +176,35 @@ Alt-modifier (both modes):
 | Key | Action |
 |---|---|
 | <kbd>alt</kbd><kbd>.</kbd> | toggle hidden files (replaces former alt-h) |
+| <kbd>alt</kbd><kbd>d</kbd> | toggle last-modified dates |
 | <kbd>alt</kbd><kbd>i</kbd> | toggle gitignored files |
-| <kbd>alt</kbd><kbd>g</kbd> | toggle git status column |
+| <kbd>alt</kbd><kbd>g</kbd> | toggle git file info column |
+| <kbd>alt</kbd><kbd>G</kbd> | toggle git status filtering |
+| <kbd>alt</kbd><kbd>W</kbd> | toggle whale-spotting (size sort + hidden + ignored + sizes + root_fs) |
 | <kbd>alt</kbd><kbd>s</kbd> | toggle staging area panel |
 | <kbd>alt</kbd><kbd>p</kbd> | toggle preview panel |
 | <kbd>alt</kbd><kbd>t</kbd> | toggle tree visibility |
 | <kbd>alt</kbd><kbd>b</kbd> | open bookmarks modal |
 | <kbd>alt</kbd><kbd>n</kbd> | create new file or directory |
+| <kbd>alt</kbd><kbd>↓</kbd> / <kbd>alt</kbd><kbd>↑</kbd> | next / previous sibling at same depth |
+| <kbd>shift</kbd><kbd>↓</kbd> / <kbd>shift</kbd><kbd>↑</kbd> | next / previous directory (skipping files) |
 
 Pressing `o` opens a single-key sort overlay: `s` size, `d` date,
 `c` count, `t` type, `f` type (dirs first), `l` type (dirs last),
 `n` none.
 
-**Breaking change:** <kbd>alt</kbd><kbd>h</kbd> no longer toggles
-hidden files — use <kbd>alt</kbd><kbd>.</kbd>. Re-bind in
-`conf.hjson` if you prefer the old key.
+Bookmark keys are case-sensitive — `h` and `H` are independent slots,
+giving you 52 letter bindings.
+
+**Breaking changes:**
+- <kbd>alt</kbd><kbd>h</kbd> no longer toggles hidden files — use
+  <kbd>alt</kbd><kbd>.</kbd>.
+- <kbd>alt</kbd><kbd>g</kbd> now toggles **git file info** (was git
+  status). Git status filtering moved to <kbd>alt</kbd><kbd>G</kbd>.
+- Bookmarks are case-sensitive: a config `key: h` no longer matches
+  Shift+H. Add a separate `key: H` entry if you want both.
+
+Re-bind in `conf.hjson` if you prefer the old behavior.
 
 ### Icons — breaking change in this release
 

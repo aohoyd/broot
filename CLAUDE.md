@@ -317,9 +317,12 @@ sync.
 Duplicate-key policy: first definition wins, later duplicates are
 dropped with `cli_log::warn!` (`src/app/bookmark.rs::materialise`,
 the `out.iter().any(...)` guard near the top of the loop). The
-comparison is ASCII-case-insensitive, mirroring the goto modal's
-case-insensitive single-char jump dispatch — so `h` and `H` are not
-both bindable. Ordering in the user list is therefore load-bearing.
+comparison is **case-sensitive** (`e.key == conf.key`) — `h` and `H`
+are independent bookmark slots, giving 52 letter bindings instead of
+26. The goto modal's single-char jump dispatch
+(`src/app/overlay/goto.rs`) mirrors this by comparing the keystroke
+char directly with `e.key == c`. Ordering in the user list is still
+load-bearing when the same exact char is repeated.
 
 ## Icon defaults
 

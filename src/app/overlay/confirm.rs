@@ -12,12 +12,14 @@
 //! │ <body line 1>                 │
 //! │ <body line 2>                 │
 //! │ …                             │
-//! │  [ Cancel ]   [ <confirm> ]   │
+//! │     [ <confirm> ]   [ Cancel ]     │
 //! ╰───────────────────────────────╯
 //! ```
 //!
-//! The default focus is `Cancel` so an absent-minded `Enter` is safe.
-//! `y` directly confirms; `n`, `Esc`, and `Ctrl-C` cancel. `Tab`, `←`,
+//! The action button sits on the left, `Cancel` on the right, and the
+//! pair is centred horizontally. Focus defaults to the action button —
+//! `Enter` commits it. The safe-exit keys (`n`, `Esc`, `Ctrl-C`) stay
+//! independent of focus; `y` likewise always confirms. `Tab`, `←`,
 //! and `→` toggle focus. `↑` / `↓` scroll the body when it overflows.
 
 use {
@@ -74,6 +76,12 @@ pub(crate) enum ConfirmFocus {
     Confirm,
 }
 
+/// Cells of horizontal space between the action and Cancel buttons when
+/// they share the bottom row. The button-row geometry centres
+/// `action + GAP + cancel` inside the frame; on pathologically narrow
+/// modals the gap collapses to 1.
+const BUTTON_GAP: u16 = 3;
+
 /// A yes/no confirmation modal.
 ///
 /// `pending` is the command that fires when the user confirms;
@@ -94,11 +102,18 @@ pub struct ConfirmOverlay {
     /// `handle_mouse` can test clicks against them. `Cell` is enough
     /// because the value is `Copy`-able as a small struct.
     button_hits: Cell<Option<ButtonHits>>,
+    /// Most-recent modal `Area` from `render`. Tests rely on this to
+    /// pin modal width independently of where the buttons land —
+    /// the centred-group layout makes button positions symmetric
+    /// around the screen centre, so they alone don't distinguish
+    /// width 40 from width 64 on an 80-col screen.
+    #[cfg(test)]
+    last_area: Cell<Option<Area>>,
 }
 
 impl ConfirmOverlay {
-    /// Build a `ConfirmOverlay` with sensible defaults: focus on
-    /// `Cancel`, scroll at 0, no cached hit-rects.
+    /// Build a `ConfirmOverlay` with sensible defaults: focus on the
+    /// action button (`Confirm`), scroll at 0, no cached hit-rects.
     pub fn new(
         title: impl Into<String>,
         body: Vec<String>,
@@ -112,9 +127,11 @@ impl ConfirmOverlay {
             confirm_label: confirm_label.into(),
             danger,
             pending,
-            focus: ConfirmFocus::Cancel,
+            focus: ConfirmFocus::Confirm,
             scroll: 0,
             button_hits: Cell::new(None),
+            #[cfg(test)]
+            last_area: Cell::new(None),
         }
     }
 
@@ -180,7 +197,8 @@ impl OverlayState for ConfirmOverlay {
         let buttons_w = saturating_to_u16(
             UnicodeWidthStr::width(cancel_text) + UnicodeWidthStr::width(confirm_text.as_str()),
         )
-        .saturating_add(4);
+        .saturating_add(BUTTON_GAP)
+        .saturating_add(2);
         let want_w = content_w.max(title_w).max(buttons_w).max(40).min(max_w);
 
         // Post-wrap row count drives want_h. We need a provisional area
@@ -203,6 +221,8 @@ impl OverlayState for ConfirmOverlay {
             // a corrupted modal on tiny terminals.
             return Ok(());
         }
+        #[cfg(test)]
+        self.last_area.set(Some(area.clone()));
 
         // ---- background clear ------------------------------------------
         // Paint spaces row-by-row so we don't depend on `Clear` (which
@@ -262,23 +282,36 @@ impl OverlayState for ConfirmOverlay {
         // border). `cancel_text` and `confirm_text` were already bound in
         // the geometry block above and are reused for both measurement
         // and paint.
+        //
+        // Layout: action button on the left, Cancel on the right,
+        // separated by `BUTTON_GAP` cells, with the whole group centred
+        // inside the frame. Display widths use `UnicodeWidthStr` (NOT
+        // `chars().count()`) so a CJK confirm label like `削除` measures
+        // as 4 cells, not 2 chars — mis-measuring here both clips the
+        // painted label and leaves the cached `ButtonHits` rect out of
+        // sync with the glyphs the user sees, so mouse routing would
+        // land on the wrong hit.
         let button_row_y = area.top + area.height - 2;
-        let half = area.width / 2;
-
-        // Layout the two buttons left/right of the centre line.
-        // Cancel sits in the left half, confirm in the right half.
-        let cancel_x = area.left + 1;
-        // Display width — must use `UnicodeWidthStr` (NOT `chars().count()`)
-        // so a CJK confirm label like `削除` measures as 4 cells, not 2
-        // chars. Mis-measuring here both clips the painted label and
-        // leaves the cached `ButtonHits` rect out of sync with the
-        // glyphs the user sees, so mouse routing would land on the wrong
-        // hit.
-        let cancel_w =
-            (UnicodeWidthStr::width(cancel_text) as u16).min(half.saturating_sub(2));
-        let confirm_w = (UnicodeWidthStr::width(confirm_text.as_str()) as u16)
-            .min(area.width.saturating_sub(half + 2));
-        let confirm_x = area.left + area.width - 1 - confirm_w;
+        let confirm_w_natural = UnicodeWidthStr::width(confirm_text.as_str()) as u16;
+        let cancel_w_natural = UnicodeWidthStr::width(cancel_text) as u16;
+        // 1-cell margin inside the frame on each side.
+        let avail = area.width.saturating_sub(2);
+        let natural = confirm_w_natural
+            .saturating_add(BUTTON_GAP)
+            .saturating_add(cancel_w_natural);
+        let (confirm_w, gap, cancel_w) = if natural <= avail {
+            (confirm_w_natural, BUTTON_GAP, cancel_w_natural)
+        } else {
+            // Pathologically narrow modal: drop to a 1-cell gap and share
+            // the remaining width between the two buttons.
+            let rem = avail.saturating_sub(1);
+            let cw = confirm_w_natural.min(rem / 2 + rem % 2);
+            let kw = cancel_w_natural.min(rem.saturating_sub(cw));
+            (cw, 1, kw)
+        };
+        let group_w = confirm_w + gap + cancel_w;
+        let confirm_x = area.left + (area.width.saturating_sub(group_w) / 2);
+        let cancel_x = confirm_x + confirm_w + gap;
 
         let cancel_focused = matches!(self.focus, ConfirmFocus::Cancel);
         let confirm_focused = matches!(self.focus, ConfirmFocus::Confirm);
@@ -500,28 +533,28 @@ mod tests {
     #[test]
     fn tab_toggles_focus() {
         let mut o = make(vec!["/tmp/x"], false);
-        assert_eq!(o.focus, ConfirmFocus::Cancel);
+        assert_eq!(o.focus, ConfirmFocus::Confirm);
         let r = o.handle_key(key!(tab));
         assert!(matches!(r, OverlayOutcome::Stay));
-        assert_eq!(o.focus, ConfirmFocus::Confirm);
-        let _ = o.handle_key(key!(tab));
         assert_eq!(o.focus, ConfirmFocus::Cancel);
+        let _ = o.handle_key(key!(tab));
+        assert_eq!(o.focus, ConfirmFocus::Confirm);
     }
 
     #[test]
     fn arrow_keys_toggle_focus() {
         let mut o = make(vec!["/tmp/x"], false);
-        assert_eq!(o.focus, ConfirmFocus::Cancel);
-        let _ = o.handle_key(key!(right));
         assert_eq!(o.focus, ConfirmFocus::Confirm);
-        let _ = o.handle_key(key!(left));
+        let _ = o.handle_key(key!(right));
         assert_eq!(o.focus, ConfirmFocus::Cancel);
+        let _ = o.handle_key(key!(left));
+        assert_eq!(o.focus, ConfirmFocus::Confirm);
     }
 
     #[test]
     fn enter_on_cancel_closes() {
         let mut o = make(vec!["/tmp/x"], false);
-        assert_eq!(o.focus, ConfirmFocus::Cancel);
+        o.focus = ConfirmFocus::Cancel;
         let r = o.handle_key(key!(enter));
         assert!(matches!(r, OverlayOutcome::Close));
     }
@@ -529,7 +562,7 @@ mod tests {
     #[test]
     fn enter_on_confirm_runs_command() {
         let mut o = make(vec!["/tmp/x"], false);
-        o.focus = ConfirmFocus::Confirm;
+        assert_eq!(o.focus, ConfirmFocus::Confirm);
         let r = o.handle_key(key!(enter));
         assert!(matches!(r, OverlayOutcome::CloseAndRun(_)));
     }
@@ -537,8 +570,8 @@ mod tests {
     #[test]
     fn y_always_confirms() {
         let mut o = make(vec!["/tmp/x"], false);
-        // even when focus is on Cancel
-        assert_eq!(o.focus, ConfirmFocus::Cancel);
+        // even when focus is forced onto Cancel
+        o.focus = ConfirmFocus::Cancel;
         let r = o.handle_key(key!('y'));
         assert!(matches!(r, OverlayOutcome::CloseAndRun(_)));
     }
@@ -800,11 +833,12 @@ mod tests {
         // Both buttons must have non-zero width.
         assert!(hits.cancel.width > 0);
         assert!(hits.confirm.width > 0);
-        // They must not overlap horizontally.
-        let cancel_right = hits.cancel.left + hits.cancel.width;
+        // Action sits to the LEFT of Cancel; the two rects must not
+        // overlap horizontally.
+        let confirm_right = hits.confirm.left + hits.confirm.width;
         assert!(
-            cancel_right <= hits.confirm.left,
-            "cancel and confirm rects overlap: {hits:?}"
+            confirm_right <= hits.cancel.left,
+            "confirm and cancel rects overlap or are mis-ordered: {hits:?}"
         );
     }
 
@@ -819,6 +853,71 @@ mod tests {
         // Should not panic, should populate hits.
         o.render(&mut wbuf, screen, &palette).unwrap();
         assert!(o.button_hits.get_cloned().is_some());
+    }
+
+    // ---- focus + layout pins -------------------------------------------
+
+    #[test]
+    fn default_focus_is_confirm() {
+        // Pin: `ConfirmOverlay::new` must default focus to the action
+        // button. Reverting to `ConfirmFocus::Cancel` would silently
+        // change the Enter-on-default semantics for every caller
+        // (destructive verbs included) — catch that here, not via
+        // downstream behaviour tests.
+        let o = make(vec!["/tmp/x"], false);
+        assert_eq!(o.focus, ConfirmFocus::Confirm);
+        let o_danger = make(vec!["/tmp/x"], true);
+        assert_eq!(
+            o_danger.focus,
+            ConfirmFocus::Confirm,
+            "danger overlays must also default to Confirm — the focus \
+             default does not branch on the danger flag",
+        );
+    }
+
+    #[test]
+    fn render_centers_button_group() {
+        // Pin the centred-group layout:
+        //   * action button sits left of Cancel (confirm_x < cancel_x);
+        //   * exactly BUTTON_GAP cells separate them;
+        //   * the whole group is centred inside the frame, with the
+        //     left and right margins differing by at most 1 cell
+        //     (integer-division asymmetry on odd modal widths).
+        //
+        // Computation for an 80-col screen with "t" title, "OK" action,
+        // and "a" body (floor width 40):
+        //   area.left = 20, area.width = 40
+        //   confirm_w = 8 (" [ OK ] "), cancel_w = 12 (" [ Cancel ] ")
+        //   group_w = 8 + 3 + 12 = 23
+        //   confirm_x = 20 + (40-23)/2 = 28
+        //   cancel_x  = 28 + 8 + 3   = 39
+        //   left margin  = 28 - 20 = 8
+        //   right margin = (20+40) - (39+12) = 9
+        let o = make(vec!["/tmp/x"], false);
+        let screen = Area::new(0, 0, 80, 24);
+        let palette = StyleMap::no_term();
+        let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
+        o.render(&mut wbuf, screen, &palette).unwrap();
+        let hits = o.button_hits.get_cloned().expect("hits cached");
+        let area = o.last_area.get_cloned().expect("area cached");
+        assert!(
+            hits.confirm.left < hits.cancel.left,
+            "action must sit LEFT of Cancel: {hits:?}",
+        );
+        let gap = hits.cancel.left - (hits.confirm.left + hits.confirm.width);
+        assert_eq!(
+            gap, BUTTON_GAP,
+            "expected {BUTTON_GAP}-cell gap between buttons; got {gap}",
+        );
+        let left_margin = hits.confirm.left - area.left;
+        let right_margin =
+            (area.left + area.width) - (hits.cancel.left + hits.cancel.width);
+        let delta = left_margin.abs_diff(right_margin);
+        assert!(
+            delta <= 1,
+            "button group must be centred; left_margin={left_margin}, \
+             right_margin={right_margin}, delta={delta}",
+        );
     }
 
     // ---- wrap_diff_line -------------------------------------------------
@@ -905,21 +1004,25 @@ mod tests {
     fn render_width_grows_to_content() {
         // 60-char body line in an 80-col screen — content_w = 60 + 4 = 64,
         // capped at 80% of screen (64). Modal width must be EXACTLY 64.
+        //
+        // Pinned via `last_area.width` rather than button-coordinate math.
+        // The centred-group layout makes confirm/cancel x-positions
+        // symmetric around the screen centre, so on an 80-col screen the
+        // button rects are the same for any modal width that fits the
+        // group — they alone can't distinguish a 64-wide modal from the
+        // 40-wide floor. `last_area` is the direct observable.
         let long = "a".repeat(60);
         let o = ConfirmOverlay::new("t", vec![long], "OK", false, cmd());
         let screen = Area::new(0, 0, 80, 24);
         let palette = StyleMap::no_term();
         let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         o.render(&mut wbuf, screen, &palette).unwrap();
-        let hits = o.button_hits.get_cloned().expect("hits cached");
-        let confirm_right = hits.confirm.left + hits.confirm.width;
-        // Modal width 64 centred in 80-col screen: area.left = 8,
-        // area.width = 64 → confirm.left + confirm.width = 71.
+        let area = o.last_area.get_cloned().expect("area cached");
         assert_eq!(
-            confirm_right, 71,
-            "expected modal width 64 (content-driven); confirm_right={confirm_right} \
-             implies width {} — content grow regression",
-            confirm_right - 7,
+            area.width, 64,
+            "expected modal width 64 (content-driven); got {} — \
+             content-grow regression",
+            area.width,
         );
         // Sanity: the full 60-char content line really lands in the body.
         let s = String::from_utf8_lossy(wbuf.buffer()).into_owned();
@@ -944,26 +1047,25 @@ mod tests {
     #[test]
     fn render_width_has_floor_for_short_body() {
         // Single 1-char body in an 80-col screen — modal width must be
-        // EXACTLY 40 (the floor), inner width 36. We pin this by counting
-        // the cached confirm-button rect's right edge: with floor 40 and
-        // a centred screen of 80, the modal spans cols [20, 60). The
-        // confirm button's right edge sits at `area.left + area.width - 1`
-        // = 59.
+        // EXACTLY 40 (the floor), inner width 36.
+        //
+        // Pinned via `last_area.width`. The button-coord-based assertion
+        // used previously can't catch a floor regression under the
+        // centred-group layout: confirm/cancel rects are symmetric
+        // around the screen centre for any modal width that fits the
+        // group, so a regression to width 25 (driven by buttons_w alone)
+        // would produce IDENTICAL button positions and pass silently.
+        // `last_area.width` is the unambiguous observable.
         let o = ConfirmOverlay::new("t", vec!["a".to_string()], "OK", false, cmd());
         let screen = Area::new(0, 0, 80, 24);
         let mut wbuf = std::io::BufWriter::with_capacity(64 * 1024, std::io::sink());
         let palette = StyleMap::no_term();
         o.render(&mut wbuf, screen, &palette).unwrap();
-        let hits = o.button_hits.get_cloned().expect("hits cached");
-        let confirm_right = hits.confirm.left + hits.confirm.width;
-        // For modal width 40 centred in 80-col screen: area.left = 20,
-        // area.width = 40, so confirm.left + confirm.width = 59.
-        // For any wider modal (e.g. 50), confirm_right would be > 59.
+        let area = o.last_area.get_cloned().expect("area cached");
         assert_eq!(
-            confirm_right, 59,
-            "expected modal width 40 (floor); confirm_right={confirm_right} \
-             implies width {} centred — floor regression",
-            confirm_right - 19,
+            area.width, 40,
+            "expected modal width 40 (floor); got {} — floor regression",
+            area.width,
         );
     }
 

@@ -170,6 +170,7 @@ Internals! {
     toggle_staging_area: "open/close the staging area panel" false,
     toggle_tree: "toggle showing more than one level of the tree" true,
     toggle_trim_root: "toggle removing nodes at first level too" false,
+    toggle_whale_spotting: "toggle whale-spotting mode (size sort + hidden + ignore + sizes + root_fs)" false,
     total_search: "search again but on all children" false,
     search_again: "either put back last search, or search deeper" false,
     trash: "move file to system trash" true,

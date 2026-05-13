@@ -117,44 +117,16 @@ impl GotoOverlay {
     }
 
     /// Compute the popup rectangle: 50 columns wide, height sized to fit
-    /// the entries (clamped to ≤ 12 rows), horizontally centred and
-    /// anchored two rows above the bottom of the screen. If the screen
-    /// is too short for bottom anchoring, fall back to centred.
+    /// the entries (clamped to ≤ 12 rows), centred on screen — matches
+    /// the SortOverlay positioning so the two single-key-pick modals
+    /// appear in the same place.
     fn compute_rect(
         screen: &Area,
         entries_len: usize,
     ) -> Area {
-        // Width: 50, but never wider than `screen.width - 2`.
-        let width = 50u16.min(screen.width.saturating_sub(2)).max(1);
-        // Height: entries + 2 (top + bottom border). Clamp to ≤ 12,
-        // and to `screen.height - 4` if smaller (leaves room for the
-        // bottom anchor).
+        let want_w = 50u16.min(screen.width.saturating_sub(2)).max(1);
         let want_h = (entries_len as u16).saturating_add(2).clamp(3, 12);
-        let max_h = screen.height.saturating_sub(4).max(3);
-        let height = want_h.min(max_h).min(screen.height);
-
-        // Horizontal centring.
-        let left = if screen.width > width {
-            screen.left + (screen.width - width) / 2
-        } else {
-            screen.left
-        };
-
-        // Vertical anchor: try `screen.bottom - height - 2`. If that
-        // would put us above the screen top, fall back to centred.
-        let want_top = screen
-            .top
-            .saturating_add(screen.height)
-            .saturating_sub(height)
-            .saturating_sub(2);
-        let top = if want_top >= screen.top && want_top + height <= screen.top + screen.height {
-            want_top
-        } else {
-            // centre vertically as a fallback
-            screen.top + screen.height.saturating_sub(height) / 2
-        };
-
-        Area::new(left, top, width, height)
+        frame::centered_rect(screen.clone(), want_w, want_h)
     }
 
     /// Test-only accessor to peek at the cached hit-rects after render.
@@ -293,23 +265,10 @@ impl OverlayState for GotoOverlay {
             return OverlayOutcome::Stay;
         }
 
-        // Single-character jump: if the keystroke is a printable char
-        // and matches one of the bookmark keys, commit immediately.
-        // Match case-insensitively so Shift+H also fires the `h` jump
-        // — terminals deliver the same Char keycode bearing different
-        // case depending on the modifier state.
+        // Single-character jump: bookmark keys are case-sensitive so
+        // `h` and `H` are independent slots (52 total).
         if let Some(c) = printable_char(&key) {
-            if let Some(entry) = self
-                .entries
-                .iter()
-                .find(|e| {
-                    let mut buf = [0u8; 4];
-                    let key_str = e.key.encode_utf8(&mut buf);
-                    let mut buf2 = [0u8; 4];
-                    let c_str = c.encode_utf8(&mut buf2);
-                    key_str.eq_ignore_ascii_case(c_str)
-                })
-            {
+            if let Some(entry) = self.entries.iter().find(|e| e.key == c) {
                 return OverlayOutcome::CloseAndFocus(entry.path.clone());
             }
         }
@@ -499,16 +458,48 @@ mod tests {
     }
 
     #[test]
-    fn shift_letter_jumps_case_insensitively() {
-        // Pressing Shift+H (which most terminals deliver as Char('H')
-        // with the SHIFT modifier) must still hit the lowercase `h`
-        // bookmark — the bookmark keys are conventionally lowercase
-        // and we do not want capitalisation to break a routine jump.
+    fn shift_letter_does_not_match_lowercase_bookmark() {
+        // Bookmark keys are case-sensitive: pressing Shift+H must NOT
+        // hit the lowercase `h` bookmark. `H` is a separate slot.
         let mut o = GotoOverlay::new(four_entries());
         let r = o.handle_key(key!(shift - 'h'));
-        match r {
-            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, PathBuf::from("/home/me")),
-            other => panic!("expected CloseAndFocus, got {other:?}"),
+        assert!(matches!(r, OverlayOutcome::Stay));
+    }
+
+    #[test]
+    fn lower_and_upper_case_keys_are_distinct() {
+        let entries = vec![
+            BookmarkEntry {
+                key: 'h',
+                path: PathBuf::from("/lower"),
+                label: "lower".into(),
+            },
+            BookmarkEntry {
+                key: 'H',
+                path: PathBuf::from("/upper"),
+                label: "upper".into(),
+            },
+        ];
+        let mut o = GotoOverlay::new(entries);
+        match o.handle_key(key!('h')) {
+            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, PathBuf::from("/lower")),
+            other => panic!("expected CloseAndFocus(/lower), got {other:?}"),
+        }
+        let mut o = GotoOverlay::new(vec![
+            BookmarkEntry {
+                key: 'h',
+                path: PathBuf::from("/lower"),
+                label: "lower".into(),
+            },
+            BookmarkEntry {
+                key: 'H',
+                path: PathBuf::from("/upper"),
+                label: "upper".into(),
+            },
+        ]);
+        match o.handle_key(key!(shift - 'h')) {
+            OverlayOutcome::CloseAndFocus(p) => assert_eq!(p, PathBuf::from("/upper")),
+            other => panic!("expected CloseAndFocus(/upper), got {other:?}"),
         }
     }
 
@@ -697,27 +688,22 @@ mod tests {
     }
 
     #[test]
-    fn compute_rect_anchors_near_bottom_when_screen_tall() {
+    fn compute_rect_is_centered_on_screen() {
         let screen = Area::new(0, 0, 80, 30);
         let rect = GotoOverlay::compute_rect(&screen, 4);
-        // height = entries (4) + 2 = 6. Anchored at screen.bottom - 6 - 2 = 22.
+        // height = entries (4) + 2 = 6. Centered: top = (30 - 6) / 2 = 12.
         assert_eq!(rect.height, 6);
-        assert_eq!(rect.top, 22);
-        // Horizontally centred: (80 - 50) / 2 = 15.
+        assert_eq!(rect.top, 12);
+        // Horizontally centered: (80 - 50) / 2 = 15.
         assert_eq!(rect.left, 15);
         assert_eq!(rect.width, 50);
     }
 
     #[test]
-    fn compute_rect_falls_back_to_centred_when_screen_short() {
-        // screen too short for bottom anchoring with 2-row margin
+    fn compute_rect_clamps_to_short_screen() {
         let screen = Area::new(0, 0, 80, 5);
         let rect = GotoOverlay::compute_rect(&screen, 4);
-        // height clamped to screen.height - 4 = 1, then min 3, then min screen.height = 5
-        // The function clamps to max(want_h.min(max_h), ...) actually:
-        //   want_h = 4+2 = 6 -> clamped to 12 -> 6
-        //   max_h = 5-4 = 1, .max(3) = 3
-        //   height = 6.min(3).min(5) = 3
+        // want_h = 6 but screen is 5, so centered_rect clamps to 5.
         assert!(rect.height <= 5);
         assert!(rect.top + rect.height <= 5);
     }

@@ -1871,6 +1871,12 @@ mod confirm_helper_tests {
             Internal::open_sort_overlay,
             Internal::copy_name,
             Internal::copy_file_content,
+            Internal::toggle_whale_spotting,
+            Internal::toggle_dates,
+            Internal::next_same_depth,
+            Internal::previous_same_depth,
+            Internal::next_dir,
+            Internal::previous_dir,
         ] {
             assert!(
                 !is_stage_consuming_internal(internal),

@@ -51,7 +51,9 @@ impl Tree {
         let builder = TreeBuilder::from(
             self.root().to_path_buf(),
             self.options.clone(),
-            page_height,
+            // `+ 1`: root sits in the frame title, not the body, so we
+            // need `page_height` children + 1 root to fill the body.
+            page_height + 1,
             con,
         )?;
         self.total_search = false; // on refresh we always do a non total search

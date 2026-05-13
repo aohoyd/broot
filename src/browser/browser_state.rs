@@ -93,7 +93,11 @@ impl BrowserState {
                 pattern,
                 total: false,
             });
-        let builder = TreeBuilder::from(path, options, BrowserState::page_height(screen), con)?;
+        // `+ 1`: the root sits in the frame title, not the body, so the
+        // builder needs one extra entry to fill `page_height` body rows
+        // with children.
+        let builder =
+            TreeBuilder::from(path, options, BrowserState::page_height(screen) + 1, con)?;
         let tree = builder.build_tree(false, dam)?;
         Ok(BrowserState {
             tree,
@@ -871,7 +875,10 @@ impl PanelState for BrowserState {
                     options.pattern = pattern;
                     let root = self.tree.root().clone();
                     let page_height = BrowserState::page_height(screen);
-                    let builder = TreeBuilder::from(root, options, page_height, con)?;
+                    // `+ 1`: root lives in the frame title — body needs
+                    // `page_height` children, tree needs `page_height + 1`
+                    // entries total.
+                    let builder = TreeBuilder::from(root, options, page_height + 1, con)?;
                     let filtered_tree = time!(
                         Info,
                         "tree filtering",

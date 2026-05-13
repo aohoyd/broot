@@ -374,17 +374,28 @@ impl VerbStore {
             .with_confirm(true)
             .with_key(key!(shift - d));
         self.add_internal(toggle_counts).with_shortcut("counts");
-        self.add_internal(toggle_dates).with_shortcut("dates");
+        self.add_internal(toggle_dates)
+            .with_key(key!(alt - d))
+            .with_shortcut("dates");
         self.add_internal(toggle_device_id).with_shortcut("dev");
         self.add_internal(toggle_files).with_shortcut("files");
         self.add_internal(toggle_ignore)
             .with_key(key!(alt - i))
             .with_shortcut("gi");
-        self.add_internal(toggle_git_file_info).with_shortcut("gf");
-        self.add_internal(toggle_git_status)
+        self.add_internal(toggle_git_file_info)
             .with_key(key!(alt - g))
+            .with_shortcut("gf");
+        self.add_internal(toggle_git_status)
+            .with_key(key!(alt - shift - g))
             .with_shortcut("gs");
         self.add_internal(toggle_root_fs).with_shortcut("rfs");
+        self.add_internal(toggle_whale_spotting)
+            .with_key(key!(alt - shift - w))
+            .with_shortcut("ws");
+        self.add_internal(next_same_depth).with_key(key!(alt - down));
+        self.add_internal(previous_same_depth).with_key(key!(alt - up));
+        self.add_internal(next_dir).with_key(key!(shift - down));
+        self.add_internal(previous_dir).with_key(key!(shift - up));
         self.add_internal(set_max_depth);
         self.add_internal(unset_max_depth);
         self.add_internal(toggle_hidden)
@@ -1103,11 +1114,13 @@ mod vim_bindings_tests {
         }
     }
 
-    /// Table-driven check for the 8 alt-modifier bindings (six panel
-    /// toggles plus the bookmarks and add modals). Alt-modifier bindings
+    /// Table-driven check for the alt-modifier bindings (panel
+    /// toggles plus the bookmarks and add modals, plus tree-navigation
+    /// modifiers and the whale-spotting toggle). Alt-modifier bindings
     /// work in both Input and Command modes (alt-* keys bypass
     /// `is_key_only_modal`), so these are always live regardless of
-    /// `modal:` config.
+    /// `modal:` config. Shift+arrow bindings live here too — they
+    /// already carry a modifier, so they aren't gated by Command mode.
     #[test]
     fn vim_alt_bindings_resolve() {
         let mut conf = Conf::default();
@@ -1115,13 +1128,20 @@ mod vim_bindings_tests {
 
         let bindings: &[(KeyCombination, Internal)] = &[
             (key!(alt - '.'), Internal::toggle_hidden),
-            (key!(alt - g), Internal::toggle_git_status),
+            (key!(alt - d), Internal::toggle_dates),
+            (key!(alt - g), Internal::toggle_git_file_info),
+            (key!(alt - shift - g), Internal::toggle_git_status),
             (key!(alt - i), Internal::toggle_ignore),
             (key!(alt - s), Internal::toggle_staging_area),
             (key!(alt - p), Internal::toggle_preview),
             (key!(alt - t), Internal::toggle_tree),
             (key!(alt - b), Internal::bookmarks),
             (key!(alt - n), Internal::add),
+            (key!(alt - shift - w), Internal::toggle_whale_spotting),
+            (key!(alt - down), Internal::next_same_depth),
+            (key!(alt - up), Internal::previous_same_depth),
+            (key!(shift - down), Internal::next_dir),
+            (key!(shift - up), Internal::previous_dir),
         ];
         for (key, expected) in bindings {
             let verb = first_verb_for_key(&store, *key).unwrap_or_else(|| {
@@ -1159,6 +1179,24 @@ mod vim_bindings_tests {
                  keymap migrated this binding to alt-. on toggle_hidden",
                 verb.names,
             );
+        }
+    }
+
+    /// Pin test: alt-g now binds `toggle_git_file_info`. `toggle_git_status`
+    /// moved to alt-G (shift-alt-g). This guards against an accidental
+    /// re-route back to the prior wiring.
+    #[test]
+    fn alt_g_no_longer_resolves_to_toggle_git_status() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let alt_g = key!(alt - g);
+        for verb in store.verbs() {
+            if verb.get_internal() == Some(Internal::toggle_git_status) {
+                assert!(
+                    !verb.keys.contains(&alt_g),
+                    "toggle_git_status still has alt-g; should be on alt-shift-g now",
+                );
+            }
         }
     }
 

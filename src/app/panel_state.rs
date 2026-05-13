@@ -578,6 +578,33 @@ pub trait PanelState {
                 bang,
                 con,
             ),
+            Internal::toggle_whale_spotting => self.with_new_options(
+                screen,
+                &|o| {
+                    let active = o.show_hidden
+                        && !o.respect_git_ignore
+                        && o.sort == Sort::Size
+                        && o.show_sizes
+                        && o.show_root_fs;
+                    if active {
+                        o.show_hidden = false;
+                        o.respect_git_ignore = true;
+                        o.sort = Sort::None;
+                        o.show_sizes = false;
+                        o.show_root_fs = false;
+                        "*whale-spotting off*"
+                    } else {
+                        o.show_hidden = true;
+                        o.respect_git_ignore = false;
+                        o.sort = Sort::Size;
+                        o.show_sizes = true;
+                        o.show_root_fs = true;
+                        "*whale-spotting on*"
+                    }
+                },
+                bang,
+                con,
+            ),
             Internal::set_max_depth => {
                 let args = input_invocation.and_then(|inv| inv.args.as_ref());
 
