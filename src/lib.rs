@@ -2,6 +2,7 @@
 extern crate cli_log;
 
 pub mod app;
+pub mod backup;
 pub mod browser;
 pub mod bulk_rename;
 pub mod cli;

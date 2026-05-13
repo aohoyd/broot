@@ -186,6 +186,7 @@ Alt-modifier (both modes):
 | <kbd>alt</kbd><kbd>t</kbd> | toggle tree visibility |
 | <kbd>alt</kbd><kbd>b</kbd> | open bookmarks modal |
 | <kbd>alt</kbd><kbd>n</kbd> | create new file or directory |
+| <kbd>alt</kbd><kbd>shift</kbd><kbd>b</kbd> | backup selection (copies to `<name>.bak`, configurable via `backup_suffix`). With 2+ staged paths, shows a confirm diff before copying. |
 | <kbd>alt</kbd><kbd>↓</kbd> / <kbd>alt</kbd><kbd>↑</kbd> | next / previous sibling at same depth |
 | <kbd>shift</kbd><kbd>↓</kbd> / <kbd>shift</kbd><kbd>↑</kbd> | next / previous directory (skipping files) |
 

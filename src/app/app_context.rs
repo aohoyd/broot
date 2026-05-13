@@ -165,8 +165,22 @@ pub struct AppContext {
     /// the built-in defaults if the user didn't declare any).
     pub bookmarks: Vec<BookmarkEntry>,
 
+    /// Suffix appended to filenames by the `:backup` verb. Defaults
+    /// to `".bak"`. Validated and resolved at `AppContext::from`
+    /// time — see `is_valid_backup_suffix`.
+    pub backup_suffix: String,
+
     /// server name
     pub server_name: Option<String>,
+}
+
+/// Validate a user-supplied backup suffix. Empty strings and strings
+/// containing path separators (`/`, `\\`) or NUL bytes are rejected
+/// to avoid producing filenames that escape the parent directory or
+/// trip OS filename rules. Anything else (including unusual but valid
+/// suffixes like `~`, `.orig`, `_backup`) is accepted.
+pub(crate) fn is_valid_backup_suffix(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains('\0')
 }
 
 impl AppContext {
@@ -251,6 +265,19 @@ impl AppContext {
 
         let bookmarks = build_bookmarks(config.bookmarks.as_deref());
 
+        // Backup suffix: default ".bak"; validate user-supplied value
+        // and fall back to default with a warning on rejection.
+        let backup_suffix = match config.backup_suffix.as_deref() {
+            Some(s) if is_valid_backup_suffix(s) => s.to_string(),
+            Some(s) => {
+                warn!(
+                    "invalid backup_suffix {s:?} (empty or contains '/', '\\\\', or NUL); falling back to \".bak\""
+                );
+                ".bak".to_string()
+            }
+            None => ".bak".to_string(),
+        };
+
         Ok(Self {
             is_tty,
             initial_root,
@@ -289,6 +316,7 @@ impl AppContext {
             preview_transformers,
             layout_instructions,
             bookmarks,
+            backup_suffix,
             server_name,
         })
     }
@@ -407,6 +435,37 @@ fn build_server_name(args: &Args) -> Option<String> {
     None
 }
 
+/// Test-only helpers shared with other modules' `#[cfg(test)]` trees.
+///
+/// `context_with_backup_suffix` was duplicated in
+/// `src/verb/execution_builder.rs`'s test module before this hoist; the
+/// two copies were drifting on the `is_valid_backup_suffix` fallback
+/// chain. Centralising the helper here keeps the fixture stable across
+/// modules that need a non-default `AppContext::backup_suffix`.
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use {
+        super::*,
+        crate::{
+            conf::{Conf, parse_default_flags},
+            verb::VerbStore,
+        },
+    };
+
+    /// Build an `AppContext` from a `Conf` whose only customisation is
+    /// the `backup_suffix` field. Lets callers assert the validation +
+    /// fallback logic without standing up a full config file.
+    pub(crate) fn context_with_backup_suffix(backup_suffix: Option<&str>) -> AppContext {
+        let mut config = Conf {
+            backup_suffix: backup_suffix.map(str::to_string),
+            ..Conf::default()
+        };
+        let verb_store = VerbStore::new(&mut config).unwrap();
+        let launch_args = parse_default_flags("").unwrap();
+        AppContext::from(launch_args, verb_store, &config).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +510,75 @@ mod tests {
             ctx.icons.is_none(),
             "icon_theme: none should yield no icon plugin",
         );
+    }
+
+    // -- backup_suffix --------------------------------------------------
+
+    // The `context_with_backup_suffix` helper is shared with
+    // `execution_builder.rs`'s test module; see
+    // `crate::app::app_context::test_helpers` below.
+    use super::test_helpers::context_with_backup_suffix;
+
+    #[test]
+    fn is_valid_backup_suffix_accepts_typical_values() {
+        assert!(is_valid_backup_suffix(".bak"));
+        assert!(is_valid_backup_suffix("~"));
+        assert!(is_valid_backup_suffix(".backup"));
+        assert!(is_valid_backup_suffix(".orig"));
+        assert!(is_valid_backup_suffix("_backup"));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_empty() {
+        assert!(!is_valid_backup_suffix(""));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_forward_slash() {
+        assert!(!is_valid_backup_suffix("/bak"));
+        assert!(!is_valid_backup_suffix("bak/"));
+        assert!(!is_valid_backup_suffix(".b/a/k"));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_backslash() {
+        assert!(!is_valid_backup_suffix("\\bak"));
+        assert!(!is_valid_backup_suffix(".b\\ak"));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_nul() {
+        assert!(!is_valid_backup_suffix("\0"));
+        assert!(!is_valid_backup_suffix(".b\0ak"));
+    }
+
+    #[test]
+    fn missing_backup_suffix_defaults_to_dot_bak() {
+        let ctx = context_with_backup_suffix(None);
+        assert_eq!(ctx.backup_suffix, ".bak");
+    }
+
+    #[test]
+    fn valid_backup_suffix_is_stored_verbatim() {
+        let ctx = context_with_backup_suffix(Some(".orig"));
+        assert_eq!(ctx.backup_suffix, ".orig");
+    }
+
+    #[test]
+    fn unusual_but_valid_suffix_is_accepted() {
+        let ctx = context_with_backup_suffix(Some("~"));
+        assert_eq!(ctx.backup_suffix, "~");
+    }
+
+    #[test]
+    fn empty_backup_suffix_falls_back_to_default() {
+        let ctx = context_with_backup_suffix(Some(""));
+        assert_eq!(ctx.backup_suffix, ".bak");
+    }
+
+    #[test]
+    fn slash_in_backup_suffix_falls_back_to_default() {
+        let ctx = context_with_backup_suffix(Some("../escape"));
+        assert_eq!(ctx.backup_suffix, ".bak");
     }
 }

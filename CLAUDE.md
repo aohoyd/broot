@@ -165,6 +165,163 @@ runs for `Internal::bulk_rename` / `Internal::bulk_rename_apply`
 because the App-level intercept catches them first — they don't
 reach the deny-list check at all.
 
+### Backup — three-internal split, `pending_backup` payload, suffix config
+
+`:backup` (bound to `alt-shift-b`) follows the same App-level
+intercept shape as bulk rename. Three internals (`internal.rs:56-58`),
+registered together at `src/verb/verb_store.rs:288-293`:
+
+- `Internal::backup` — keyed trigger, `auto_exec:true` (the default
+  for `add_internal`). The intercept at `src/app/app.rs:256-261`
+  routes to `run_backup`.
+- `Internal::backup_one` — single-file receiver. Registered with
+  `with_auto_exec(false)` + `no_doc()`. Its invocation pattern
+  `backup_one {new_filename:backup-name}`
+  (`src/verb/internal.rs:203`) carries the placeholder that prefills
+  the input bar with the computed next-free name; `auto_exec:false`
+  is what keeps the verb from firing until the user reviews/edits and
+  hits Enter.
+- `Internal::backup_apply` — bulk receiver, `auto_exec:true`, also
+  `no_doc()`, no key. Only reachable via the confirm overlay's
+  `CloseAndRun(":backup_apply")` re-dispatch.
+
+The asymmetry is load-bearing: `backup_one` MUST stay `auto_exec:false`
+or the prefill flow collapses into instant execution; the other two
+MUST stay `auto_exec:true` or keystroke-and-overlay-re-dispatch
+dispatch silently breaks. Two pin tests catch regressions on the
+registration shape: `backup_internals_registered`
+(`src/verb/verb_store.rs:1319-1383`) and
+`backup_keybind_resolves_to_trigger`
+(`src/verb/verb_store.rs:1391-1403`). Touch the registration block
+and re-run both tests.
+
+`App::pending_backup: Option<crate::backup::BackupRun>`
+(`src/app/app.rs:114`) is the payload field, mirroring
+`pending_bulk_rename`. `run_backup` (stage ≥2 leg,
+`src/app/app.rs:934-986`) plans the bulk run via `plan_bulk_backup`,
+stashes it on `pending_backup`, and opens a confirm overlay with
+`Command::from_raw(":backup_apply", true)` as the pending command.
+`run_backup_apply` (`src/app/app.rs:1148-1182`) consumes the field
+via the `take_pending_backup_or_error` helper
+(`src/app/app.rs:1637-1641`).
+
+Cancellation cleanup lives in the shared `OverlayOutcome::Close` arm
+(`src/app/app.rs:1200-1214`) which calls the free function
+`clear_pending_runs_slots` (`src/app/app.rs:1624-1635`). Both
+`pending_bulk_rename` and `pending_backup` are dropped to `None`
+together, so a cancelled overlay can never leave a stale plan that a
+later direct `:backup_apply` would pick up. Adding a third
+pending-run payload requires a four-touchpoint edit:
+  1. extend `clear_pending_runs_slots`'s signature with the new
+     `&mut Option<…>`,
+  2. add the `= None` assignment inside its body,
+  3. pass the new slot from the `OverlayOutcome::Close` call site
+     (the in-place argument list at `:1211-1214`),
+  4. extend the `clear_pending_runs_slots_drops_every_field` pin test
+     in the `backup_routing_tests` module
+     (`src/app/app.rs:2783-2811`).
+
+Stage-<2 prefill: `run_backup` delegates to `prefill_backup_one`
+(`src/app/app.rs:1001-1043`), which directly builds the prefilled
+`:backup_one <next-free-name>` invocation via
+`ExecutionBuilder::invocation_with_default` and writes it into the
+active panel's input bar. This is INLINE prefill at the App layer,
+not a `Command::VerbTrigger` re-dispatch. The reason: the
+panel-input prefill branch (`command/panel_input.rs:526-540`) only
+fires on physical key events; a synthesized `VerbTrigger { backup_one,
+None }` going through `apply_command` would re-enter the
+`Internal::backup_one` intercept and fail with "missing invocation"
+(the trigger carries no `input_invocation`). Mirroring the panel-
+input logic inside `prefill_backup_one` keeps the prefill in one
+place per flow without coupling `apply_command` to the input-row.
+The receiver-verb lookup uses
+`resolve_backup_one_invocation_parser` (`src/app/app.rs:1677-1690`),
+a free function that walks the verb store once searching for
+`get_internal() == Some(Internal::backup_one)` and returns the
+`InvocationParser` by shared ref. Searching on `get_internal()` (not
+`verb.has_name`) means a renamed external verb can't accidentally
+shadow the receiver lookup. The
+`{new_filename:backup-name}` placeholder is evaluated in
+`get_sel_name_standard_replacement`
+(`src/verb/execution_builder.rs:230-260`), which reads
+`con.backup_suffix` and calls `crate::backup::next_free_backup_name`.
+Non-UTF-8 file_name yields `None`; the bare `{name}{suffix}`
+composition is the fallback when `next_free_backup_name` exhausts
+its candidates (so the user sees a colliding name in the bar and
+the receiver rejects on Enter, rather than the prompt collapsing
+to empty).
+
+**Numbered fallback and cap sentinel**: `next_free_backup_name`
+probes `{name}{suffix}` first, then `.1`..`.MAX_BACKUP_BUMP` (=999,
+`src/backup/mod.rs:54`). The 999 ceiling is a soft brake on
+pathological inputs — three digits, far past any realistic backup
+set. When the cap is exhausted, `plan_bulk_backup` emits a sentinel
+row with `dst == src` (`src/backup/mod.rs:115-137`); the apply step
+matches on this sentinel and surfaces a status error rather than
+running a self-copy (`src/backup/mod.rs:154-176`). `run_backup`
+detects the sentinel BEFORE opening the confirm overlay (the
+`blocked_count > 0` branch in `src/app/app.rs:960-973`) and routes
+through the `cap_exhaust_message` helper
+(`src/app/app.rs:1652-1666`) which renders the singular vs plural
+form. The user sees a "too many existing backups for <path> (and N
+more)" status row enumerating the first blocked path plus the count
+of remaining blocked paths, and the overlay never appears.
+
+**Manual collision rejects, prefill collision bumps**: the asymmetry
+sits on the receiver line. The prefill path (the `backup-name`
+placeholder) silently bumps `.bak.N` until it finds a free slot —
+that's the whole point of the placeholder. But when the user types
+a name that already exists, `plan_single_backup`
+(`src/app/app.rs:1715-1760`) rejects with `"backup destination
+already exists"` rather than silently bumping. The rationale matches
+the rest of the codebase: an explicit user choice that would
+silently override (either by bumping or by truncating) bypasses the
+"destructive operations require confirm" policy. `fs::copy` would
+silently truncate, and a hidden bump would discard the typed name.
+Both are footguns; the receiver refuses and the user picks a
+different name. The `Internal::backup` trigger is omitted from this
+intercept by design — `:rm` + `:backup` is the explicit overwrite
+path, both of which already prompt.
+
+`plan_single_backup` also rejects path-traversal input: a typed
+name containing `/` or `\\`, a `..`/`.` component, or an absolute
+path prefix returns `Err` before `parent.join(name)` runs. Without
+this guard a name like `../escape` would let the user's typed string
+escape the parent directory entirely; the bare existence check
+afterwards isn't sufficient because `target.exists()` against
+`/abs/path` is a different file system question than "would the
+typed name place the backup outside the source's parent".
+
+**Suffix config plumbing checklist** — the standard four-touchpoint
+trap from "Bookmarks config plumbing":
+
+1. `Conf::backup_suffix: Option<String>` with
+   `#[serde(alias = "backup-suffix")]` at `src/conf/conf.rs:129-134`.
+2. `overwrite!(self, backup_suffix, conf)` in `Conf::read_file`
+   at `src/conf/conf.rs:269` — this is the merge line, forgetting
+   it makes the field "not work".
+3. `AppContext::backup_suffix: String` (always resolved, never
+   `Option`) at `src/app/app_context.rs:171`, populated in
+   `AppContext::from` (`:268-279`) with `is_valid_backup_suffix`
+   validation and default `".bak"`.
+4. `is_valid_backup_suffix` (`src/app/app_context.rs:182-184`)
+   rejects empty / contains `/`, `\\`, or `\0` — and only those four
+   conditions. Any other suffix (`~`, `.orig`, `_backup`) passes.
+   Rejection emits `cli_log::warn!` and falls back to `".bak"`.
+
+**`is_stage_consuming_internal` exclusion**: none of the three
+backup internals appear in the deny-list (`src/app/app.rs:1799`).
+The reason mirrors the `bulk_rename` family: the App-level intercept
+at `src/app/app.rs:263-281` short-circuits the `Internal::backup`,
+`Internal::backup_one`, and `Internal::backup_apply` arms BEFORE
+they reach the panel-dispatch layer. (Note: this App-level arm
+actually runs AFTER `maybe_bulk_stage_confirm` in `apply_command`,
+but safety comes from the deny-list returning `false` for these
+internals — not from execution order.) If you ever move a backup
+leg out of the App-level intercept into a panel `on_internal`, add
+it to the deny-list at the same time — otherwise stage-≥2
+invocations will silently bypass the bulk-stage confirm.
+
 ## ConfirmOverlay sizing and soft-wrap
 
 Scope: applies to every `ConfirmOverlay` caller (bulk-rename,
@@ -252,7 +409,7 @@ dispatch; the first match wins:
    active panel and `app_state.stage.len() >= 2`. The internal-side
    logic is a **deny-list**: confirm only when the resolved verb is
    external, or when the resolved internal is in
-   `is_stage_consuming_internal` (`src/app/app.rs:1310`). Everything
+   `is_stage_consuming_internal` (`src/app/app.rs:1799`). Everything
    else — navigation, app-level verbs (`:quit`, `:help`, `:back`,
    `:escape`, `:refresh`), panel switching, every `:toggle_*`, every
    `:sort_by_*`, every `:input_*`, search, bookmarks, stage-management
@@ -631,7 +788,7 @@ a synthesized `:sort_by_*` (or `:no_sort`) command that the App
 re-dispatches through `apply_command`.
 
 The `:sort_by_*` family of verbs are NOT in the bulk-stage
-deny-list (`is_stage_consuming_internal` at `src/app/app.rs:1310`)
+deny-list (`is_stage_consuming_internal` at `src/app/app.rs:1799`)
 because they don't iterate the stage — they mutate the active panel's
 tree options. Any future sort-related internal that DOES consume the
 stage must be added to that deny-list, mirroring the rule for

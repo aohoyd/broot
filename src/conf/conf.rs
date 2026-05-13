@@ -126,6 +126,13 @@ pub struct Conf {
     #[serde(alias = "auto-open-staging-area")]
     pub auto_open_staging_area: Option<bool>,
 
+    /// Suffix appended to filenames by the `:backup` verb. Default
+    /// is `".bak"` (resolved in `AppContext::from`). Empty strings
+    /// or strings containing `/`, `\\`, or `\0` are rejected at
+    /// load time and fall back to the default.
+    #[serde(alias = "backup-suffix")]
+    pub backup_suffix: Option<String>,
+
     /// User-declared single-character bookmarks for the Goto modal.
     ///
     /// `None` (field absent) means the runtime should fall back to the
@@ -259,6 +266,7 @@ impl Conf {
         overwrite!(self, file_sum_threads_count, conf);
         overwrite!(self, max_staged_count, conf);
         overwrite!(self, auto_open_staging_area, conf);
+        overwrite!(self, backup_suffix, conf);
         // bookmarks: an explicit user list (even empty) replaces previous
         // values, matching the "verbs/explicit-list-wins" intent. The
         // generic `overwrite!` macro fits because the field is

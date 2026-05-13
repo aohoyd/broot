@@ -27,6 +27,21 @@ pub enum VerbArgFlag {
     PathFromDirectory,
     PathFromParent,
     Theme,
+    /// Marker used inside an invocation pattern's `{name:backup-name}`
+    /// group. **Intentionally inert** — never consulted by
+    /// `has_flag(...)`, `merging_flag()`, or `path_anchor()`. The
+    /// `ARG_DEF_GROUP` regex is shared between verb definitions
+    /// (where the segment after `:` lists flags) and invocation
+    /// patterns (where the same segment names a default-value source
+    /// consumed by `invocation_with_default`). Registering
+    /// `backup-name` as a flag variant silences the
+    /// `from_capture` warn-on-unknown for invocation-pattern strings
+    /// without otherwise changing behaviour: the actual substitution
+    /// is keyed on the `"backup-name"` string inside
+    /// `ExecutionBuilder::get_sel_name_standard_replacement` and
+    /// flows through the default-value path, never the flag path.
+    /// Sibling to the equally-inert `Theme` variant.
+    BackupName,
 }
 
 impl VerbArgFlag {
@@ -122,6 +137,7 @@ impl FromStr for VerbArgFlag {
             "path-from-directory" => Ok(Self::PathFromDirectory),
             "path-from-parent" => Ok(Self::PathFromParent),
             "theme" => Ok(Self::Theme),
+            "backup-name" => Ok(Self::BackupName),
             _ => Err(ConfError::UnknownVerbArgFlag {
                 name: s.to_string(),
             }),
@@ -140,6 +156,7 @@ impl fmt::Display for VerbArgFlag {
             Self::PathFromDirectory => "path-from-directory",
             Self::PathFromParent => "path-from-parent",
             Self::Theme => "theme",
+            Self::BackupName => "backup-name",
         };
         write!(f, "{s}")
     }

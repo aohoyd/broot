@@ -227,6 +227,35 @@ impl<'b> ExecutionBuilder<'b> {
                     .ok()
                     .map(|p| self.path_to_string(p))
             }
+            "backup-name" => {
+                // First-free backup destination filename for the
+                // current selection, used to prefill the
+                // `:backup_one` invocation. The `con.backup_suffix`
+                // is the user-configurable tail (".bak" by default,
+                // validated by
+                // `crate::app::app_context::is_valid_backup_suffix`).
+                // When `next_free_backup_name` exhausts its `.N`
+                // candidates we still return the bare
+                // `{name}{suffix}` composition so the input bar is
+                // populated; the user can edit, and the single-file
+                // receiver (`crate::app::App::run_backup_one` via
+                // `plan_single_backup`) is what eventually rejects
+                // an existing destination. Non-UTF-8 file_name
+                // yields `None` so the caller's `unwrap_or_default`
+                // produces an empty prefill — there is no honest
+                // bare-composition recovery in that case.
+                let path = sel.map(|s| s.path)?;
+                let file_name = path.file_name()?.to_str()?;
+                let suffix = con.backup_suffix.as_str();
+                let chosen = crate::backup::next_free_backup_name(path, suffix);
+                let name = chosen
+                    .as_ref()
+                    .and_then(|pb| pb.file_name())
+                    .and_then(|os| os.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{file_name}{suffix}"));
+                Some(name)
+            }
             #[cfg(unix)]
             "server-name" => con.server_name.clone(),
             _ => None,
@@ -568,6 +597,123 @@ mod execution_builder_test {
             let exec_token = builder.exec_token(&exec_pattern, &con);
             assert_eq!(exec_token, chk_exec_token);
         }
+    }
+
+    /// Shared `context_with_backup_suffix` lives in
+    /// `crate::app::app_context::test_helpers`. The thin wrapper here
+    /// adapts the `&str` parameter (this module's existing signature)
+    /// to the shared helper's `Option<&str>` shape.
+    fn context_with_backup_suffix(suffix: &str) -> AppContext {
+        crate::app::app_context::test_helpers::context_with_backup_suffix(Some(suffix))
+    }
+
+    /// Resolve the `backup-name` placeholder for `selection_path` under
+    /// `con`. The selection lives at `selection_path` regardless of
+    /// whether the file actually exists on disk; the real-filesystem
+    /// probe inside `next_free_backup_name` consults the parent and
+    /// the candidate names, not the source itself.
+    fn resolve_backup_name(selection_path: &Path, con: &AppContext) -> Option<String> {
+        let sel = Selection {
+            path: selection_path,
+            line: 0,
+            stype: SelectionType::File,
+            is_exe: false,
+        };
+        let app_state = AppState::new(PathBuf::from("/".to_owned()));
+        let builder = ExecutionBuilder::without_invocation(SelInfo::One(sel), &app_state);
+        builder.get_sel_name_standard_replacement("backup-name", Some(sel), con)
+    }
+
+    /// No collision: `<name>.bak` is the first free candidate. Pins
+    /// the happy path through `next_free_backup_name` to the
+    /// `get_sel_name_standard_replacement` arm.
+    #[test]
+    fn backup_name_returns_bare_suffix_when_no_collision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let src = dir.join("foo");
+        std::fs::write(&src, b"x").unwrap();
+
+        let con = AppContext::default(); // default suffix is ".bak"
+        let got = resolve_backup_name(&src, &con).expect("must resolve");
+        assert_eq!(got, "foo.bak");
+    }
+
+    /// Pre-existing `<name>.bak` forces a `.1` bump. Pins that the
+    /// returned string is the `file_name()` (not the full path) of
+    /// `next_free_backup_name`'s output.
+    #[test]
+    fn backup_name_bumps_to_one_on_collision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let src = dir.join("foo");
+        std::fs::write(&src, b"x").unwrap();
+        std::fs::write(dir.join("foo.bak"), b"existing").unwrap();
+
+        let con = AppContext::default();
+        let got = resolve_backup_name(&src, &con).expect("must resolve");
+        assert_eq!(got, "foo.bak.1");
+    }
+
+    /// Custom suffix `~` flows through `con.backup_suffix` (not
+    /// hardcoded). Pins that the placeholder respects user config.
+    #[test]
+    fn backup_name_uses_configured_suffix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let src = dir.join("foo.txt");
+        std::fs::write(&src, b"x").unwrap();
+
+        let con = context_with_backup_suffix("~");
+        let got = resolve_backup_name(&src, &con).expect("must resolve");
+        assert_eq!(got, "foo.txt~");
+    }
+
+    /// Cap-exhaust: every `<name>.bak` and `<name>.bak.{1..=MAX}` exists
+    /// on disk → `next_free_backup_name` returns `None`. The arm must
+    /// fall back to the bare `<name>{suffix}` composition so the input
+    /// bar is still populated; the user sees a colliding name and the
+    /// receiver rejects it with "backup destination already exists"
+    /// (see `crate::app::plan_single_backup`'s `target.exists()` guard).
+    #[test]
+    fn backup_name_falls_back_to_bare_composition_when_cap_exhausted() {
+        use crate::backup::MAX_BACKUP_BUMP;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let src = dir.join("foo");
+        std::fs::write(&src, b"x").unwrap();
+        std::fs::write(dir.join("foo.bak"), b"").unwrap();
+        for n in 1..=MAX_BACKUP_BUMP {
+            std::fs::write(dir.join(format!("foo.bak.{n}")), b"").unwrap();
+        }
+
+        let con = AppContext::default();
+        let got = resolve_backup_name(&src, &con).expect("fallback must yield Some");
+        assert_eq!(
+            got, "foo.bak",
+            "cap-exhaust falls back to bare composition so the prefill is non-empty",
+        );
+    }
+
+    /// `SelInfo::None`: the `backup-name` arm's first line is
+    /// `let path = sel.map(|s| s.path)?;` — with no selection, the
+    /// helper returns `None` and the input bar prefill stays empty.
+    /// Pins the no-selection contract so a future refactor that
+    /// accidentally falls back to a default path (e.g. `root`) gets
+    /// caught.
+    #[test]
+    fn backup_name_returns_none_when_no_selection() {
+        let app_state = AppState::new(PathBuf::from("/".to_owned()));
+        let builder = ExecutionBuilder::without_invocation(SelInfo::None, &app_state);
+        let con = AppContext::default();
+        // Bypass the `resolve_backup_name` test-helper because it
+        // constructs a `SelInfo::One` — we want to exercise the
+        // `None` arm explicitly.
+        let got = builder.get_sel_name_standard_replacement("backup-name", None, &con);
+        assert!(
+            got.is_none(),
+            "SelInfo::None must yield None for backup-name, got {got:?}",
+        );
     }
 
     #[test]

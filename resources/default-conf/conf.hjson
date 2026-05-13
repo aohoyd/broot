@@ -124,6 +124,15 @@ icon_theme: nerdfont
 # ]
 
 ###############################################################
+# Backup suffix
+# Tail appended by the `:backup` verb when composing the
+# destination filename. Default is `.bak`. If `<name><suffix>`
+# already exists, broot bumps with `.1`, `.2`, … up to `.999` —
+# it never silently overwrites.
+#
+# backup_suffix: ".bak"
+
+###############################################################
 # Special paths
 # If some paths must be handled specially, uncomment (and change
 # this section as per the examples)

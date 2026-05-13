@@ -1659,7 +1659,7 @@ mod copy_file_content_tests {
     }
 }
 
-fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;

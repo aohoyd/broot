@@ -272,6 +272,25 @@ impl VerbStore {
         )
         .with_auto_exec(false)
         .with_key(key!(f2));
+        // `backup` mirrors `bulk_rename`'s three-internal split:
+        //   - `Internal::backup` is the keyed trigger; the App-level
+        //     intercept routes to either single-file or bulk flow
+        //     based on stage size.
+        //   - `Internal::backup_one` is the single-file receiver. Its
+        //     invocation pattern carries a `{new_filename:backup-name}`
+        //     placeholder so the input bar is prefilled with the
+        //     computed next-free backup name; `with_auto_exec(false)`
+        //     keeps the verb from firing until the user hits Enter.
+        //   - `Internal::backup_apply` is the bulk receiver, consuming
+        //     `App::pending_backup` after the confirm overlay accepts.
+        //     It has no key and is hidden from docs — only reachable
+        //     via the confirm overlay's `CloseAndRun` re-dispatch.
+        self.add_internal(backup)
+            .with_key(key!(alt - shift - b));
+        self.add_internal(backup_one)
+            .with_auto_exec(false)
+            .no_doc();
+        self.add_internal(backup_apply).no_doc();
         self.add_internal_bang(start_end_panel)
             .with_key(key!(ctrl - p));
         // the char keys for mode_input are handled differently as they're not
@@ -1287,6 +1306,99 @@ mod vim_bindings_tests {
         assert_eq!(
             last.get_internal(),
             Some(Internal::sort_by_type_dirs_last),
+        );
+    }
+
+    /// Pin test: all three backup internals must be registered. The
+    /// trigger `backup` is keyed (alt-shift-b); the receiver
+    /// `backup_one` is auto_exec=false (prefill flow); the bulk
+    /// continuation `backup_apply` is unbound and hidden. Without
+    /// these registrations the alt-shift-b keystroke, the input-bar
+    /// prefill, and the confirm-overlay `CloseAndRun` re-dispatch
+    /// would all silently fail.
+    #[test]
+    fn backup_internals_registered() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let trigger = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::backup))
+            .expect("backup must be registered");
+        assert!(
+            trigger.has_name("backup"),
+            "backup must be invocable by name",
+        );
+        let one = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::backup_one))
+            .expect("backup_one must be registered");
+        assert!(
+            one.has_name("backup_one"),
+            "backup_one must be invocable by name",
+        );
+        assert!(
+            !one.auto_exec,
+            "backup_one must be auto_exec=false so the prefill flow \
+             waits for the user's Enter before applying",
+        );
+        // The receiver's invocation pattern carries the
+        // `{new_filename:backup-name}` placeholder. Without it the
+        // `auto_exec:false` prefill flow can't fire — the input bar
+        // would be empty when the user lands on the verb. Pinning
+        // both the `invocation_parser` presence and the placeholder
+        // string catches a future `Internal::invocation_pattern`
+        // edit that strips the placeholder.
+        let parser = one
+            .invocation_parser
+            .as_ref()
+            .expect("backup_one must carry an invocation_parser");
+        let pattern_str = format!(
+            "{} {}",
+            parser.invocation_pattern.name,
+            parser.invocation_pattern.args.as_deref().unwrap_or(""),
+        );
+        assert!(
+            pattern_str.contains("backup-name"),
+            "backup_one's invocation pattern must mention `backup-name` \
+             (the placeholder consumed by `invocation_with_default` to \
+             prefill the input bar), got: {pattern_str:?}",
+        );
+        let apply = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::backup_apply))
+            .expect("backup_apply must be registered");
+        assert!(
+            apply.has_name("backup_apply"),
+            "backup_apply must be invocable by name (the confirm \
+             overlay's CloseAndRun re-dispatch resolves by name)",
+        );
+        assert!(
+            apply.keys.is_empty(),
+            "backup_apply must not bind any key — only reachable via \
+             the confirm overlay's CloseAndRun",
+        );
+    }
+
+    /// Dispatch-path pin test: `alt-shift-b` must resolve to the
+    /// trigger `Internal::backup`, not to either of the two receivers
+    /// (`backup_one`, `backup_apply`). Registration order matters
+    /// because `find_key_verb` returns the first verb whose `keys`
+    /// list contains the keystroke.
+    #[test]
+    fn backup_keybind_resolves_to_trigger() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let alt_shift_b = key!(alt - shift - b);
+        let verb = first_verb_for_key(&store, alt_shift_b)
+            .expect("alt-shift-b must be bound");
+        assert_eq!(
+            verb.get_internal(),
+            Some(Internal::backup),
+            "alt-shift-b must resolve to Internal::backup (the \
+             trigger), not to backup_one or backup_apply",
         );
     }
 }

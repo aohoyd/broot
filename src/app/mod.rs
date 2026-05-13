@@ -1,5 +1,8 @@
 mod app;
+#[cfg(not(test))]
 mod app_context;
+#[cfg(test)]
+pub(crate) mod app_context;
 mod app_panels;
 mod app_state;
 mod bookmark;

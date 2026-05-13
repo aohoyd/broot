@@ -7,6 +7,7 @@
 - destructive verbs prompt before running: built-in `:rm` and `:trash` always confirm; `:cp`/`:mv` confirm when the destination already exists; bulk staging operations confirm the fan-out count
 - `confirm: true|false` field on verbs (parallel to `auto_exec`) lets users opt their own externals into the prompt or opt the built-ins out
 - new `:goto_bookmarks` internal verb (default key `g`) opens a single-character jump menu populated from a new `bookmarks` config section; built-in defaults: `h` (home), `d` (~/Downloads), `c` (${XDG_CONFIG_HOME} or ~/.config), `t` (trash)
+- new `:backup` internal verb (default key `alt-shift-b`) creates a backup copy of the selection or each staged path; suffix configurable via `backup_suffix` (default `.bak`), with numbered fallback `.bak.1`..`.bak.999`, never silently overwriting; 2+ staged paths show a `src → dst` ConfirmOverlay before applying
 
 ### v1.56.2 - 2026-03-26
 <a name="v1.56.2"></a>

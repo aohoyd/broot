@@ -53,6 +53,9 @@ Internals! {
     add: "create file or directory" false,
     apply_flags: "apply flags (eg `-sd` to show sizes and dates)" false,
     back: "revert to the previous state (mapped to *esc*)" false,
+    backup: "create a backup copy of the selection (or all staged paths)" true,
+    backup_one: "(internal receiver; do not bind)" true,
+    backup_apply: "(internal continuation; do not bind)" false,
     bulk_rename: "rename one or more files via $EDITOR" false,
     bulk_rename_apply: "(internal continuation; do not bind)" false,
     default_layout: "restore default panel sizes" false,
@@ -197,6 +200,7 @@ impl Internal {
             Self::set_panel_width => r"set_panel_width (?P<idx>\d+) (?P<width>\d+)",
             Self::set_max_depth => r"set_max_depth (?P<depth>\d+)",
             Self::set_syntax_theme => r"set_syntax_theme {theme:theme}",
+            Self::backup_one => r"backup_one {new_filename:backup-name}",
             Self::write_output => r"write_output (?P<line>.*)",
             _ => self.name(),
         }
@@ -211,6 +215,7 @@ impl Internal {
             Self::line_up_no_cycle => r"line_up_no_cycle {count}",
             Self::move_panel_divider => r"move_panel_divider {idx} {dx}",
             Self::set_panel_width => r"set_panel_width {idx} {width}",
+            Self::backup_one => r"backup_one {new_filename}",
             Self::write_output => r"write_output {line}",
             _ => self.name(),
         }
