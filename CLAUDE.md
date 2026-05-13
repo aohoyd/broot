@@ -347,6 +347,117 @@ in the tree assumes this 2-cell prefix. If you change the spacing,
 audit the callers that compute `cw.allowed`-style budgets and the
 content-extract path that subtracts a small constant from `cw.allowed`.
 
+### Icon coloring — `colors::resolve` and the two-pass paint
+
+The icon cell and the trailing space are painted on **different
+styles**. In `write_line_label` the icon glyph goes out with
+`compute_icon_style(...)` while the next `queue_char(..., ' ')` keeps
+`label_style` — keeping the space on `label_style` preserves bg
+continuity across the icon/name seam (selection bands, panel bg,
+ext_color overrides). The 2-cell prefix invariant from the "Icon
+defaults" paragraph above is unchanged.
+
+`compute_icon_style` (defined in `src/display/displayable_tree.rs`,
+just above `impl DisplayableTree`) has a short-circuit: when the
+caller's `has_ext_override` is `true` (i.e. the user's `ext_colors`
+config matched the file's extension), the icon returns
+`label_style.clone()` with NO Bold added — the user override wins on
+icon AND name, and bolding only the icon would visually split the row.
+Otherwise the function asks `IconPlugin::get_icon_color`, sets the fg
+if it returns `Some`, and adds `Attribute::Bold` (Bold matches elio's
+look and survives even when the plugin returns `None`).
+
+Symlinks behave like their own name's extension for the
+`has_ext_override` test, not their target's: when a user has
+`ext_colors[txt]` set and the row is `link.txt -> target.rs`, the
+override fires and both icon and name paint identically — the Rust
+target color is intentionally suppressed. This keeps every `.txt`-like
+row visually uniform regardless of symlink-ness. The plugin's per-type
+color lookup (when the override is absent) does still walk the target
+name, so a non-overridden symlink shows the target's icon color.
+
+`IconPlugin::get_icon_color` (`src/icon/icon_plugin.rs:13-21`) has a
+default impl returning `None`, so monochrome plugins need not
+implement it.
+
+The factory at `src/icon/mod.rs:17-43` recognises three icon-set
+names: `nerdfont` (colored, default), `nerdfont-mono` (same glyphs
+without per-file color — `.mono()` toggles the `FontPlugin::colored`
+flag the plugin checks before consulting `colors::resolve`), and
+`vscode` (also colored — palette is keyed by file type, not glyph
+set, so there is no `vscode-mono` variant). `icon_theme: none` still
+disables icons entirely.
+
+`colors::resolve` (`src/icon/colors.rs:517-541`) priority:
+
+```
+Pruning       → None          (current dimmed style preserved)
+Dir           → DIRNAME[name]                              ?? CLASS[Directory]
+File          → FILENAME[name] ?? EXT[double_ext] ?? EXT[ext] ?? CLASS[infer_class]
+SymLink       → resolve(final_target) as if it were a File
+BrokenSymLink → CLASS[Other]
+```
+
+Names and extensions are lowercased at lookup time, so the four
+`&'static [(&str, (u8, u8, u8))]` source slices (in file order:
+`CLASS_COLOR_PAIRS`, `EXT_COLOR_PAIRS`, `FILENAME_COLOR_PAIRS`,
+`DIRNAME_COLOR_PAIRS`) hold lowercase keys only — elio's
+case-duplicated entries (`"Public"`/`"public"`) collapse to one row.
+The `dirname_color` lookup uses `to_lowercase()` (Unicode-aware) so
+real-world directories like `Público`, `Imágenes`, `Música` fold to
+their table keys; `ext_color` and `filename_color` use
+`to_ascii_lowercase()` because file extensions and the registered
+filename anchors are ASCII. Slices are loaded into `FxHashMap`s via
+`once_cell::sync::Lazy` on first access. Values were transcribed from
+elio's effective resolved palette
+(`src/ui/theme/appearance/rules/{classes,extensions}.rs` overlaid with
+`assets/themes/default/theme.toml`); when the TOML and the Rust baseline
+disagreed, TOML won. Preserve that policy on updates.
+
+`DisplayableTree` carries `icon_plugin: Option<&(dyn IconPlugin + Send +
+Sync)>` (`src/display/displayable_tree.rs:62`). Active call sites:
+`src/browser/browser_state.rs` and `src/preview/dir_view.rs` forward
+the running plugin; `DisplayableTree::out_of_app`
+(`src/display/displayable_tree.rs:96-117`) and the `launchable.rs`
+offline-tree dump deliberately pass `None` — out-of-app tree text stays
+uncolored. New `DisplayableTree` construction sites default to `None`
+unless color is wanted.
+
+### Per-name directory glyphs
+
+`FontPlugin` carries a fifth lookup table
+`dir_name_to_icon_name_map: FxHashMap<&'static str, &'static str>`
+(`src/icon/font.rs`), populated only for `nerdfont` and `nerdfont-mono`.
+The vscode factory arm passes `&[]` (`src/icon/mod.rs`) so vscode keeps
+its single `default_folder` glyph for every directory — its icon set
+doesn't carry the Nerd Font PUA codepoints elio uses.
+
+The `TreeLineType::Dir` arm of `get_icon` calls `handle_dir(name)` which
+lowercases via `to_lowercase()` (unicode-aware) before consulting the
+map, so `Música`, `Público`, `Imágenes`, etc. match the lowercase keys.
+Matches parity with `dirname_color` at `src/icon/colors.rs:461`. Use
+`to_lowercase()` not `to_ascii_lowercase()` here for the same reason —
+the locale-collapsed home directories on non-English systems must hit.
+
+The data file is
+`resources/icons/nerdfont/data/dir_name_to_icon_name_map.rs` (53 dir
+entries, 28 unique codepoints). The codepoints were transcribed from
+elio's `assets/themes/default/theme.toml [directories]` and appended
+to `resources/icons/nerdfont/data/icon_name_to_icon_code_point_map.rs`
+with `dir_*` names (e.g., `dir_dotgit`, `dir_docs`). Entries beginning
+with a dot are prefixed `dir_dot*` to avoid collisions between a
+dotfile dir (`.config` → `0xe5fc`) and a plain dir (`config` → `0xf0493`).
+
+**Deliberately separate from `DIRNAME_COLOR_PAIRS`**: the glyph table
+(in `resources/icons/nerdfont/data/`) and the color table (in
+`src/icon/colors.rs`) are keyed on the same directory names but live
+in different layers — icon plugin vs color palette. Do not merge them.
+Adding a new dir entry means updating both layers; the existing
+`FontPlugin::sanity_check` debug-build guard catches typos in icon
+names, but no equivalent enforces that every glyph entry has a color
+counterpart (or vice-versa) — by design, the two layers can have
+asymmetric coverage.
+
 ## Footer-zone theming
 
 All thirteen footer-zone style keys default to background `rgb(6, 11, 20)`

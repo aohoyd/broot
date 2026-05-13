@@ -781,5 +781,33 @@
 ( "file_type_zeit", 0xf15b ),
 ( "file_type_zig", 0xe6a9 ), // 
 ( "file_type_zip", 0xf1c6 ), // 
-( "file_type_zip2", 0xf1c6 ),// 
+( "file_type_zip2", 0xf1c6 ),//
+( "dir_dotastro", 0xe6b3 ), //
+( "dir_dotcache", 0xf0aba ), // 󰪺
+( "dir_dotcargo", 0xe7a8 ), //
+( "dir_dotconfig", 0xe5fc ), //
+( "dir_dotgit", 0xf02a2 ), // 󰊢
+( "dir_dotgithub", 0xf02a4 ), // 󰊤
+( "dir_dotidea", 0xe7b5 ), //
+( "dir_dotnext", 0xe7d3 ), //
+( "dir_dotnpm", 0xf03d7 ), // 󰏗
+( "dir_dotnuxt", 0xf1106 ), // 󱄆
+( "dir_dotpnpm_store", 0xe6b4 ), //
+( "dir_dotssh", 0xf08ac ), // 󰢬
+( "dir_dotsvelte_kit", 0xe697 ), //
+( "dir_dotvenv", 0xe606 ), //
+( "dir_dotvscode", 0xe70c ), //
+( "dir_dotyarn", 0xe6a7 ), //
+( "dir_tests", 0xf024b ), // 󰉋
+( "dir_assets", 0xf024f ), // 󰉏
+( "dir_bin", 0xf107f ), // 󱁿
+( "dir_config", 0xf0493 ), // 󰒓
+( "dir_coverage", 0xf0668 ), // 󰙨
+( "dir_descargas", 0xf024d ), // 󰉍
+( "dir_desktop", 0xf0379 ), // 󰍹
+( "dir_docs", 0xf19f7 ), // 󱧷
+( "dir_documentos", 0xf0c83 ), // 󰲃
+( "dir_music", 0xf1359 ), // 󱍙
+( "dir_target", 0xf19fd ), // 󱧽
+( "dir_videos", 0xf0567 ), // 󰕧
 ]

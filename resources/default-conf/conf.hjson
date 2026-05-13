@@ -94,11 +94,13 @@ show_selection_mark: true
 # a Nerd Font in your terminal to render them
 # (see https://dystroy.org/broot/icons for installation and
 # troubleshooting).
-# Other supported values: `vscode` (uses the bundled vscode font)
+# Other supported values: `vscode` (uses the bundled vscode font),
+# `nerdfont-mono` (same Nerd Font glyphs without per-file color),
 # and `none` to disable icons entirely.
 #
 icon_theme: nerdfont
 # icon_theme: vscode
+# icon_theme: nerdfont-mono  # same glyphs as nerdfont, without per-file color
 # icon_theme: none  # to disable icons
 
 ###############################################################

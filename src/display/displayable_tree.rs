@@ -12,6 +12,7 @@ use {
         content_search::ContentMatch,
         errors::ProgramError,
         file_sum::FileSum,
+        icon::IconPlugin,
         pattern::PatternObject,
         skin::{
             ExtColorMap,
@@ -32,6 +33,7 @@ use {
     crokey::crossterm::{
         QueueableCommand,
         cursor,
+        style::Attribute,
     },
     file_size,
     git2::Status,
@@ -57,6 +59,36 @@ pub struct DisplayableTree<'a, 's, 't> {
     pub area: termimad::Area,
     pub in_app: bool, // if true we show the selection and scrollbar
     pub ext_colors: &'s ExtColorMap,
+    pub icon_plugin: Option<&'s (dyn IconPlugin + Send + Sync)>,
+}
+
+/// Derive the icon-cell style from the row's `label_style`.
+///
+/// When `has_ext_override` is true, the user's `ext_colors` config has
+/// matched and wins on both the icon and the filename — return the
+/// label style unchanged (no plugin color, no Bold), so icon and name
+/// look identical. Otherwise, ask the icon plugin for a per-type color
+/// and add Bold. The bg is inherited from `label_style` so selection
+/// painting works.
+fn compute_icon_style(
+    label_style: &CompoundStyle,
+    has_ext_override: bool,
+    icon_plugin: Option<&dyn IconPlugin>,
+    line_type: &TreeLineType,
+    name: &str,
+    ext: Option<&str>,
+) -> CompoundStyle {
+    let mut s = label_style.clone();
+    if has_ext_override {
+        return s;
+    }
+    if let Some(plugin) = icon_plugin {
+        if let Some(c) = plugin.get_icon_color(line_type, name, ext) {
+            s.set_fg(c);
+        }
+    }
+    s.add_attr(Attribute::Bold);
+    s
 }
 
 impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
@@ -72,6 +104,7 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             tree,
             skin,
             ext_colors,
+            icon_plugin: None,
             area: termimad::Area {
                 left: 0,
                 top: 0,
@@ -312,7 +345,19 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
     ) -> Result<usize, ProgramError> {
         cond_bg!(char_match_style, self, selected, self.skin.char_match);
         if let Some(icon) = line.icon {
-            cw.queue_char(style, icon)?;
+            let ext = line.extension();
+            let has_ext_override = ext
+                .map(|e| self.ext_colors.get(e).is_some())
+                .unwrap_or(false);
+            let icon_style = compute_icon_style(
+                style,
+                has_ext_override,
+                self.icon_plugin.map(|p| p as &dyn IconPlugin),
+                &line.line_type,
+                &line.name,
+                ext,
+            );
+            cw.queue_char(&icon_style, icon)?;
             cw.queue_char(style, ' ')?;
         }
         if pattern_object.subpath {
@@ -618,5 +663,143 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             write!(f, "\r\n")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crokey::crossterm::style::Color;
+
+    struct ColoredStub;
+    impl IconPlugin for ColoredStub {
+        fn get_icon(
+            &self,
+            _: &TreeLineType,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> char {
+            '?'
+        }
+        fn get_icon_color(
+            &self,
+            _: &TreeLineType,
+            _: &str,
+            _: Option<&str>,
+        ) -> Option<Color> {
+            Some(Color::Rgb {
+                r: 255,
+                g: 143,
+                b: 64,
+            })
+        }
+    }
+
+    struct UncoloredStub;
+    impl IconPlugin for UncoloredStub {
+        fn get_icon(
+            &self,
+            _: &TreeLineType,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> char {
+            '?'
+        }
+    }
+
+    fn label_style_with(fg: Option<Color>, bg: Option<Color>) -> CompoundStyle {
+        let mut s = CompoundStyle::default();
+        if let Some(c) = fg {
+            s.set_fg(c);
+        }
+        if let Some(c) = bg {
+            s.set_bg(c);
+        }
+        s
+    }
+
+    #[test]
+    fn icon_style_inherits_bg_from_label_style() {
+        let bg = Color::Rgb { r: 30, g: 30, b: 60 };
+        let label = label_style_with(Some(Color::White), Some(bg));
+        let plugin: Box<dyn IconPlugin> = Box::new(ColoredStub);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(icon.get_bg(), Some(bg));
+    }
+
+    #[test]
+    fn icon_style_applies_plugin_color_when_no_ext_override() {
+        let label = label_style_with(Some(Color::White), None);
+        let plugin: Box<dyn IconPlugin> = Box::new(ColoredStub);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(
+            icon.get_fg(),
+            Some(Color::Rgb { r: 255, g: 143, b: 64 })
+        );
+        assert!(icon.has_attr(Attribute::Bold));
+    }
+
+    #[test]
+    fn icon_style_skips_plugin_color_when_ext_override_present() {
+        let label_fg = Color::Rgb { r: 100, g: 200, b: 50 };
+        let label = label_style_with(Some(label_fg), None);
+        let plugin: Box<dyn IconPlugin> = Box::new(ColoredStub);
+        let icon = compute_icon_style(
+            &label,
+            true,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(icon.get_fg(), Some(label_fg));
+        assert!(!icon.has_attr(Attribute::Bold));
+    }
+
+    #[test]
+    fn icon_style_skips_plugin_color_when_plugin_returns_none() {
+        let label_fg = Color::White;
+        let label = label_style_with(Some(label_fg), None);
+        let plugin: Box<dyn IconPlugin> = Box::new(UncoloredStub);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(icon.get_fg(), Some(label_fg));
+        assert!(icon.has_attr(Attribute::Bold));
+    }
+
+    #[test]
+    fn icon_style_without_plugin_still_adds_bold() {
+        let label = label_style_with(Some(Color::White), None);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            None,
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert!(icon.has_attr(Attribute::Bold));
     }
 }

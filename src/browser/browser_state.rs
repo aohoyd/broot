@@ -939,6 +939,7 @@ impl PanelState for BrowserState {
             tree: self.displayed_tree(),
             skin: &disc.panel_skin.styles,
             ext_colors: &disc.con.ext_colors,
+            icon_plugin: disc.con.icons.as_deref(),
             area: disc.state_area.clone(),
             in_app: true,
         };

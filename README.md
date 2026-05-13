@@ -212,14 +212,17 @@ Nerd Font icons are **on by default**. Earlier broot versions
 shipped with no icons; users upgrading from those versions will see
 unfamiliar glyph columns. If your terminal does not have a Nerd Font
 installed, set `icon_theme: none` in `conf.hjson` to restore the
-previous behaviour. See [the icons page](https://dystroy.org/broot/icons)
-for installation guidance.
+previous behaviour, or `icon_theme: nerdfont-mono` if you want the
+glyphs but not per-file color. See
+[the icons page](https://dystroy.org/broot/icons) for installation
+guidance.
 
 ## Icons
 
 Nerd Font icons are on by default. Set `icon_theme: none` in
-`conf.hjson` to turn them off, or `icon_theme: vscode` for the VSCode
-glyphs.
+`conf.hjson` to turn them off, `icon_theme: vscode` for the VSCode
+glyphs, or `icon_theme: nerdfont-mono` for Nerd Font glyphs without
+per-file color.
 
 ## Manage files with panels
 
