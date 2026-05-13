@@ -51,16 +51,19 @@ the event loop dispatches to `overlay.handle_key` /
 event (`src/app/app.rs:1028-1049`).
 
 The four `OverlayOutcome` variants decide what happens after the
-handler runs (`src/app/app.rs:867-898`):
+handler runs (`src/app/app.rs:1018-1063`):
 
 - `Stay` — event consumed, overlay remains.
-- `Close` — overlay dropped. The Close arm also clears
-  `App::pending_bulk_rename` so a cancelled bulk-rename confirm doesn't
-  leave a stale plan that a later direct `:bulk_rename_apply` could
-  pick up.
+- `Close` — overlay dropped. The Close arm also calls
+  `clear_pending_runs_slots`, which drops EVERY `pending_*` payload
+  (currently `pending_bulk_rename` AND `pending_backup`) so a cancelled
+  confirm doesn't leave a stale plan that a later direct
+  `:*_apply` invocation could pick up. Adding a new `pending_*` field
+  means extending the helper — see the "Backup" sub-section's
+  four-touchpoint rule.
 - `CloseAndRun(cmd)` — overlay dropped, `App::skip_confirm = true`,
   then `cmd` re-enters `apply_command`. The `skip_confirm` flag
-  (`src/app/app.rs:87`, cleared at `:205`) is the loop-avoidance
+  (`src/app/app.rs:88`, cleared at `:218`) is the loop-avoidance
   signal — without it the destructive verb would re-open the same
   overlay. Cleared unconditionally on every dispatch.
   `App::pending_bulk_rename: Option<RenameRun>` is the sibling
@@ -75,13 +78,13 @@ Adding a new overlay variant means editing three places only: the
 `Overlay` enum, and each of the three dispatch shims (`render`,
 `handle_key`, `handle_mouse`). There is no extra plumbing — no event
 filter, no panel callback, no `CmdResult` variant beyond the existing
-`OpenOverlay` (`src/app/app.rs:515`).
+`OpenOverlay` (`src/app/app.rs:553`).
 
 ### Add modal — `Internal::add` / `AddOverlay`
 
 `Internal::add` is the create-file-or-directory entry point. It is
 **browser-only** by design: the handler lives in
-`BrowserState::on_internal` (`src/browser/browser_state.rs:803`); for
+`BrowserState::on_internal` (`src/browser/browser_state.rs:823`); for
 every other panel type the wildcard arm in `on_internal_generic`
 returns `CmdResult::Keep` so the keypress is silently consumed.
 
@@ -142,8 +145,8 @@ through a command.
 external `rename` verb bind F2. `find_key_verb` returns the first
 verb in registration order whose filters pass, so the internal wins.
 F2 always goes through the bulk flow — `run_bulk_rename` collects
-paths via the shared `collect_rename_paths` helper
-(`stage || [selection]`, `src/app/app.rs:1475-1493`), so a single
+paths via the shared `collect_bulk_paths` helper
+(`stage || [selection]`, `src/app/app.rs:1492`), so a single
 selection is treated as a 1-element bulk run. The external `rename`
 verb is still callable as a typed `:rename newname` invocation from
 the command bar, but F2 no longer reaches it. The pin test
@@ -194,9 +197,9 @@ the test fails so the dead receiver gets removed.
 
 `App::pending_backup: Option<crate::backup::BackupRun>`
 (`src/app/app.rs:108`) is the payload field, mirroring
-`pending_bulk_rename`. `run_backup` (`src/app/app.rs:893-952`)
-collects paths via the shared `collect_rename_paths` helper
-(`stage || [selection]`, `src/app/app.rs:1475-1493`), plans the bulk
+`pending_bulk_rename`. `run_backup` (`src/app/app.rs:896`)
+collects paths via the shared `collect_bulk_paths` helper
+(`stage || [selection]`, `src/app/app.rs:1492`), plans the bulk
 run via `plan_bulk_backup`, stashes it on `pending_backup`, and
 opens a confirm overlay with `Command::from_raw(":backup_apply",
 true)` as the pending command. `run_backup_apply`
@@ -228,7 +231,7 @@ matches on this sentinel and surfaces a status error rather than
 running a self-copy. `run_backup` detects the sentinel BEFORE
 opening the confirm overlay (the `blocked_count > 0` branch in
 `src/app/app.rs:914-927`) and routes through the
-`cap_exhaust_message` helper (`src/app/app.rs:1495-1511`) which
+`cap_exhaust_message` helper (`src/app/app.rs:1541`) which
 renders the singular vs plural form. The user sees a "too many
 existing backups for <path> (and N more)" status row enumerating the
 first blocked path plus the count of remaining blocked paths, and
@@ -255,7 +258,7 @@ trap from "Bookmarks config plumbing":
 
 **`is_stage_consuming_internal` exclusion**: neither `Internal::backup`
 nor `Internal::backup_apply` appears in the deny-list
-(`src/app/app.rs:1547`). The reason mirrors the `bulk_rename` family:
+(`src/app/app.rs:1603`). The reason mirrors the `bulk_rename` family:
 the App-level intercept at `src/app/app.rs:258-269` short-circuits
 both arms BEFORE they reach the panel-dispatch layer. (Note: this
 App-level arm actually runs AFTER `maybe_bulk_stage_confirm` in
@@ -344,15 +347,15 @@ they must opt in via `confirm: true` in their `conf.hjson`. The unit
 test at `src/verb/verb_store.rs:756-781` pins this behaviour.
 
 The intercept lives in `App::apply_command` and runs three checks in
-order (`src/app/app.rs:185-205`). At most one overlay opens per
+order (`src/app/app.rs:184-217`). At most one overlay opens per
 dispatch; the first match wins:
 
 1. Bulk staging — `App::maybe_bulk_stage_confirm`
-   (`src/app/app.rs:669`). Fires only when the stage panel is the
+   (`src/app/app.rs:707`). Fires only when the stage panel is the
    active panel and `app_state.stage.len() >= 2`. The internal-side
    logic is a **deny-list**: confirm only when the resolved verb is
    external, or when the resolved internal is in
-   `is_stage_consuming_internal` (`src/app/app.rs:1547`). Everything
+   `is_stage_consuming_internal` (`src/app/app.rs:1603`). Everything
    else — navigation, app-level verbs (`:quit`, `:help`, `:back`,
    `:escape`, `:refresh`), panel switching, every `:toggle_*`, every
    `:sort_by_*`, every `:input_*`, search, bookmarks, stage-management
@@ -382,9 +385,9 @@ dispatch; the first match wins:
    flag — `src/app/app.rs:604`, `:629`, `:650`).
 
 `skip_confirm` and an already-open overlay both bypass the intercept
-(`src/app/app.rs:185`). The bookkeeping is symmetric: a re-dispatched
+(`src/app/app.rs:198`). The bookkeeping is symmetric: a re-dispatched
 command from `CloseAndRun` clears its bypass on the way through
-(`:205`), so a verb that itself opens a new overlay (none exist today,
+(`:218`), so a verb that itself opens a new overlay (none exist today,
 but the door is open) still gets the next round of checks.
 
 ## Stage-key unification — single arm, single advance helper
@@ -408,7 +411,7 @@ by name like any other verb.
 
 `BrowserState::on_internal` collapses both `Internal::stage` and
 `Internal::toggle_stage` into a single combined match arm
-(`src/browser/browser_state.rs:825-832`) so the two internals are
+(`src/browser/browser_state.rs:843-847`) so the two internals are
 indistinguishable inside the tree panel. The arm body is two steps:
 `self.stage(...)` (which delegates to `Stage::add` — idempotent on a
 re-stage) then `advance_after_stage(self.displayed_tree_mut(),
@@ -783,7 +786,7 @@ a synthesized `:sort_by_*` (or `:no_sort`) command that the App
 re-dispatches through `apply_command`.
 
 The `:sort_by_*` family of verbs are NOT in the bulk-stage
-deny-list (`is_stage_consuming_internal` at `src/app/app.rs:1547`)
+deny-list (`is_stage_consuming_internal` at `src/app/app.rs:1603`)
 because they don't iterate the stage — they mutate the active panel's
 tree options. Any future sort-related internal that DOES consume the
 stage must be added to that deny-list, mirroring the rule for

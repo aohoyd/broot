@@ -58,7 +58,7 @@ enum BrowserTask {
 /// `cycle=false` is load-bearing: staging the last entry must leave
 /// the cursor on the last entry, not wrap around to the root. Both
 /// arms call `move_selection(1, page_height, false)`.
-pub(crate) fn advance_after_stage(tree: &mut Tree, page_height: usize) {
+fn advance_after_stage(tree: &mut Tree, page_height: usize) {
     tree.move_selection(1, page_height, false);
 }
 
@@ -1610,8 +1610,6 @@ mod tests {
     // the key-binding half of the feature.
     //
 
-    use crate::stage::Stage;
-
     #[test]
     fn stage_advances_selection() {
         // Tree with N>1 selectable children; selection starts at the
@@ -1647,31 +1645,29 @@ mod tests {
 
     #[test]
     fn toggle_stage_now_acts_like_stage() {
-        // Both names that resolve to the unified arm
-        // (`Internal::stage` and `Internal::toggle_stage`) call
-        // `self.stage(...)` → `Stage::add`, which is idempotent:
-        // re-staging a path leaves it in the stage. Pin both halves of
-        // the toggle-stage rewrite here — first that the path stays
-        // staged, then that the cursor advances via the SAME helper
-        // the arm uses.
+        // The unified arm matches both `Internal::stage` and
+        // `Internal::toggle_stage` and runs the same two-step body:
+        // `self.stage(...)` then `advance_after_stage(...)`. This test
+        // pins the advance half — the only part testable without
+        // constructing a full `CmdContext`.
+        //
+        // The "staging is idempotent under toggle_stage" half is NOT
+        // pinned here because we can't drive the actual arm body from
+        // a unit test (it requires a real `CmdContext`, which pulls in
+        // event-source / TTY plumbing that the test harness can't
+        // construct). A standalone `Stage::default()` would only pin
+        // `Stage::add` idempotency, not the arm's call to it — if the
+        // arm regressed to skip `self.stage(...)` entirely, such an
+        // assertion would still pass. Manual smoke tests in a live
+        // terminal cover the staging half; the source-of-truth pin
+        // for the wiring is the arm body's literal call (visible in
+        // `BrowserState::on_internal` next to the
+        // `advance_after_stage` call).
         let mut state = fake_browser_state_with_children(0, 4);
         state.displayed_tree_mut().selection = 1;
-        let path = state.displayed_tree().selected_line().path.clone();
-        let mut stage = Stage::default();
-        stage.add(path.clone());
-        assert!(stage.contains(&path), "precondition: path is staged");
-
-        // Simulate the arm body: re-add (idempotent) then advance via
-        // the SAME free function the arm uses.
-        stage.add(path.clone());
         let page_height = BrowserState::page_height(screen(24));
         super::advance_after_stage(state.displayed_tree_mut(), page_height);
 
-        assert!(
-            stage.contains(&path),
-            "re-staging an already-staged path must leave it staged \
-             (toggle_stage now has add-only semantics in browser)",
-        );
         assert_eq!(
             state.displayed_tree().selection,
             2,

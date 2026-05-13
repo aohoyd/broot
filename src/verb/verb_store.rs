@@ -245,13 +245,13 @@ impl VerbStore {
         // `bulk_rename` is registered BEFORE the external `rename` verb
         // (which also binds F2) so that `find_key_verb` — which scans
         // verbs in registration order and returns the first match —
-        // resolves F2 to the internal first. The internal is the
-        // context-aware entry point: with a stage of 0-1 paths it falls
-        // through to the inline rename via a synthesized
-        // `Command::VerbTrigger`; with 2+ it drives the $EDITOR-backed
-        // bulk flow. The continuation `bulk_rename_apply` is NOT bound
-        // to any key — it is only ever reached from the confirm
-        // overlay's `CloseAndRun` path.
+        // resolves F2 to the internal first. The internal always
+        // collects paths via `collect_bulk_paths`
+        // (`stage || [selection]`) and routes through the
+        // `$EDITOR`-backed bulk flow. N=1 is just a one-row bulk run —
+        // there is no separate fast path. The continuation
+        // `bulk_rename_apply` is NOT bound to any key — it is only ever
+        // reached from the confirm overlay's `CloseAndRun` path.
         self.add_internal(bulk_rename)
             .with_key(key!(f2))
             .with_key(key!('r'));

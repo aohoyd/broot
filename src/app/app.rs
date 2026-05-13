@@ -787,7 +787,7 @@ impl App {
         if paths.is_empty() {
             self.panels
                 .mut_panel()
-                .set_error("bulk rename: no selection".to_string());
+                .set_error(BULK_RENAME_NO_SELECTION_MSG.to_string());
             return Ok(());
         }
 
@@ -808,7 +808,7 @@ impl App {
             }
         };
         if run.renames.is_empty() {
-            self.panels.mut_panel().set_message("bulk rename: no changes");
+            self.panels.mut_panel().set_message(BULK_RENAME_NO_CHANGES_MSG);
             return Ok(());
         }
 
@@ -903,7 +903,7 @@ impl App {
         if paths.is_empty() {
             self.panels
                 .mut_panel()
-                .set_error("backup: no selection".to_string());
+                .set_error(BACKUP_NO_SELECTION_MSG.to_string());
             return Ok(());
         }
 
@@ -934,10 +934,16 @@ impl App {
         }
 
         let count = run.copies.len();
+        fn name_or_display(p: &std::path::Path) -> String {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| p.display().to_string())
+        }
         let body: Vec<String> = run
             .copies
             .iter()
-            .map(|c| format!("{} → {}", c.src.display(), c.dst.display()))
+            .map(|c| format!("{} → {}", name_or_display(&c.src), name_or_display(&c.dst)))
             .collect();
         let title = if count == 1 {
             "Backup 1 file?".to_string()
@@ -1404,27 +1410,17 @@ fn resolve_overwrite_target(
     let value = values.get(&arg_name)?;
     let parent = source.parent()?;
     let mut target = path::path_from(parent, PathAnchor::Unspecified, value);
-    // If the resolved target is an existing directory and the source
-    // is a regular file, the actual write target is `target/<basename>`.
+    // If the resolved target is an existing directory, the actual write
+    // target is `target/<basename>` regardless of whether the source is
+    // a file or a directory. For file-into-dir this is the standard
+    // copy/move semantics; for dir-into-dir this places the source as
+    // a child of `target`. In both cases the existence probe re-checks
+    // at the joined path — no overwrite, no prompt.
     let target_meta = target.symlink_metadata().ok()?;
     if target_meta.is_dir() {
-        if source.is_dir() {
-            // dir -> dir: cp/mv into a directory means writing the
-            // source as a child of `target`. The actual collision
-            // target is `target/<source-basename>`. If that path does
-            // not already exist, no overwrite occurs and we should
-            // *not* prompt.
-            let basename = source.file_name()?;
-            target = target.join(basename);
-            target.symlink_metadata().ok()?;
-        } else {
-            // file -> dir: actual write target is `target/<basename>`.
-            let basename = source.file_name()?;
-            target = target.join(basename);
-            // Re-check existence at the joined path: only prompt if it
-            // collides with an existing file.
-            target.symlink_metadata().ok()?;
-        }
+        let basename = source.file_name()?;
+        target = target.join(basename);
+        target.symlink_metadata().ok()?;
     }
     if target == source {
         return None;
@@ -1487,6 +1483,16 @@ fn take_pending_bulk_rename_or_error(
 /// selection — production callers convert that to a "no selection"
 /// status error.
 ///
+/// Cross-panel behaviour is INTENTIONAL: a non-empty stage takes
+/// precedence over the active panel's selection even when the user
+/// triggers the verb from the browser/tree panel. Pressing F2 while
+/// browsing an unrelated file with a non-empty stage opens the bulk
+/// editor over the staged paths, not over the current selection. The
+/// rationale: the stage IS the user's pending work-set; if it's
+/// non-empty they care about it. Users who want to operate on the
+/// current selection alone clear the stage first (`:clear_stage`) or
+/// unstage individually (`-`).
+///
 /// Extracted so the predicate is unit-testable without constructing
 /// an `App`.
 fn collect_bulk_paths(
@@ -1506,8 +1512,28 @@ fn collect_bulk_paths(
 /// because every input path was rejected (non-existent or otherwise
 /// ineligible). Pinned by `backup_no_eligible_paths_msg_is_error` so
 /// the wording stays stable across refactors.
-pub(crate) const BACKUP_NO_ELIGIBLE_PATHS_MSG: &str =
+const BACKUP_NO_ELIGIBLE_PATHS_MSG: &str =
     "backup: no eligible paths";
+
+/// Canonical status-error string for `:bulk_rename` when neither the
+/// stage nor the active panel's selection yields any paths. Surfaced
+/// via `set_error` so the severity is clear; pinned by
+/// `bulk_rename_no_selection_msg_is_error_string` to prevent silent
+/// wording drift.
+const BULK_RENAME_NO_SELECTION_MSG: &str = "bulk rename: no selection";
+
+/// Canonical status-message string for `:bulk_rename` when the user
+/// saves the editor without changing any names — the planned run is
+/// empty. Surfaced via `set_message` (not `set_error`) because the
+/// no-op outcome is a normal "nothing to do" result, not a failure.
+/// Pinned by `bulk_rename_no_changes_msg_is_message_string`.
+const BULK_RENAME_NO_CHANGES_MSG: &str = "bulk rename: no changes";
+
+/// Canonical status-error string for `:backup` when neither the stage
+/// nor the active panel's selection yields any paths. Sibling to
+/// `BULK_RENAME_NO_SELECTION_MSG`. Pinned by
+/// `backup_no_selection_msg_is_error_string`.
+const BACKUP_NO_SELECTION_MSG: &str = "backup: no selection";
 
 /// Build the status-row text for a cap-exhaust failure in
 /// `run_backup`. `first_path` is the first blocked source path;
@@ -1519,6 +1545,16 @@ pub(crate) const BACKUP_NO_ELIGIBLE_PATHS_MSG: &str =
 /// format string is unit-testable; tests pin both branches against
 /// the literal text the user sees in the status row.
 fn cap_exhaust_message(first_path: &Path, blocked_count: usize) -> String {
+    // Precondition: production callers guard with `if blocked_count > 0`
+    // (`run_backup`'s cap-exhaust branch only enters when at least one
+    // sentinel row is present). A debug assertion catches a future
+    // caller that forgets the guard; the `saturating_sub` keeps the
+    // release build well-defined (it produces "(and 0 more)" rather
+    // than underflowing).
+    debug_assert!(
+        blocked_count > 0,
+        "cap_exhaust_message called with blocked_count == 0 — caller must guard",
+    );
     if blocked_count == 1 {
         format!(
             "backup: too many existing backups for {}",
@@ -1528,7 +1564,7 @@ fn cap_exhaust_message(first_path: &Path, blocked_count: usize) -> String {
         format!(
             "backup: too many existing backups for {} (and {} more); resolve manually before running again",
             first_path.display(),
-            blocked_count - 1,
+            blocked_count.saturating_sub(1),
         )
     }
 }
@@ -1680,6 +1716,23 @@ mod confirm_helper_tests {
     pub(super) fn fresh_store() -> crate::verb::VerbStore {
         let mut conf = crate::conf::Conf::default();
         crate::verb::VerbStore::new(&mut conf).expect("default store")
+    }
+
+    /// Build a real `AppContext` from defaults. Shared with the
+    /// sibling `bulk_rename_routing_tests` and `backup_routing_tests`
+    /// modules (`pub(super)`) so the helper lives in exactly one
+    /// place. Mirrors the `context_with_icon_theme` helper in
+    /// `app_context.rs`'s test module — we use the same machinery so
+    /// the verb-store the test inspects is the production one, not a
+    /// hand-rolled stub.
+    pub(super) fn make_app_context() -> crate::app::AppContext {
+        use crate::conf::{Conf, parse_default_flags};
+        use crate::verb::VerbStore;
+        let mut config = Conf::default();
+        let verb_store = VerbStore::new(&mut config).unwrap();
+        let launch_args = parse_default_flags("").unwrap();
+        crate::app::AppContext::from(launch_args, verb_store, &config)
+            .expect("AppContext::from must succeed with defaults")
     }
 
     /// Lookup the first verb in a fresh store with `name` as a shortcut.
@@ -2223,28 +2276,14 @@ mod bulk_rename_routing_tests {
 
     use {
         super::*,
-        crate::{
-            conf::{Conf, parse_default_flags},
-            verb::{VerbInvocation, VerbStore},
-        },
+        crate::verb::VerbInvocation,
     };
 
-    // `fresh_store` is shared with `confirm_helper_tests`. Re-using
-    // their definition rather than re-declaring keeps the verb-store
-    // construction in one place.
-    use super::confirm_helper_tests::fresh_store;
-
-    /// Helper: assemble a real AppContext from defaults. Mirrors the
-    /// `context_with_icon_theme` helper in `app_context.rs`'s test
-    /// module — we use the same machinery so the verb-store the test
-    /// inspects is the production one, not a hand-rolled stub.
-    fn make_app_context() -> crate::app::AppContext {
-        let mut config = Conf::default();
-        let verb_store = VerbStore::new(&mut config).unwrap();
-        let launch_args = parse_default_flags("").unwrap();
-        crate::app::AppContext::from(launch_args, verb_store, &config)
-            .expect("AppContext::from must succeed with defaults")
-    }
+    // `fresh_store` and `make_app_context` are shared with
+    // `confirm_helper_tests`. Re-using their definitions rather than
+    // re-declaring keeps the verb-store and context construction in
+    // one place.
+    use super::confirm_helper_tests::{fresh_store, make_app_context};
 
     #[test]
     fn resolved_internal_recognises_command_internal_directly() {
@@ -2299,6 +2338,54 @@ mod bulk_rename_routing_tests {
         let con = make_app_context();
         assert_eq!(resolved_internal(&Command::None, &con), None);
         assert_eq!(resolved_internal(&Command::Click(0, 0), &con), None);
+    }
+
+    /// `Command::VerbTrigger` pointing to an *external* verb must
+    /// resolve to `None` — the helper only returns `Some` when the
+    /// resolved verb carries an internal execution. Pinning this
+    /// keeps the App-level intercept correct: a triggered external
+    /// verb (e.g. the standalone `:rename` shell verb) must fall
+    /// through to the panel-dispatch layer, not be claimed by the
+    /// `Internal::bulk_rename` arm.
+    #[test]
+    fn resolved_internal_returns_none_for_verb_trigger_on_external() {
+        let con = make_app_context();
+        // The external `rename` verb has no internal execution.
+        let verb_id = con
+            .verb_store
+            .verbs()
+            .iter()
+            .find(|v| v.has_name("rename") && v.get_internal().is_none())
+            .expect("external rename verb registered")
+            .id;
+        let cmd = Command::VerbTrigger {
+            verb_id,
+            input_invocation: None,
+        };
+        assert_eq!(
+            resolved_internal(&cmd, &con),
+            None,
+            "VerbTrigger on an external verb must yield None",
+        );
+    }
+
+    /// Same coverage for `Command::VerbInvocate` on an external verb:
+    /// the lookup walks the verb store and finds the external by
+    /// name, but `get_internal()` returns `None`, so the helper
+    /// returns `None` and the intercept does not fire.
+    #[test]
+    fn resolved_internal_returns_none_for_verb_invocate_on_external() {
+        let con = make_app_context();
+        let cmd = Command::VerbInvocate(VerbInvocation::new(
+            "rename".to_string(),
+            Some("newname".to_string()),
+            false,
+        ));
+        assert_eq!(
+            resolved_internal(&cmd, &con),
+            None,
+            "VerbInvocate on an external verb must yield None",
+        );
     }
 
     /// Pin that the external `rename` verb stays registered in the
@@ -2427,6 +2514,42 @@ mod bulk_rename_routing_tests {
              stale-guard rather than re-applying the same plan",
         );
     }
+
+    /// Pin the canonical "no selection" error string surfaced by
+    /// `run_bulk_rename` when `collect_bulk_paths` returns empty (no
+    /// stage, no selection). The string is surfaced via `set_error`
+    /// (not `set_message`) so the severity is encoded in the API.
+    /// Prevents silent wording drift in the rename domain.
+    #[test]
+    fn bulk_rename_no_selection_msg_is_error_string() {
+        assert_eq!(
+            super::BULK_RENAME_NO_SELECTION_MSG,
+            "bulk rename: no selection",
+        );
+        assert!(
+            super::BULK_RENAME_NO_SELECTION_MSG.starts_with("bulk rename:"),
+            "message must be prefixed with the verb domain, got: {}",
+            super::BULK_RENAME_NO_SELECTION_MSG,
+        );
+    }
+
+    /// Pin the canonical "no changes" message surfaced by
+    /// `run_bulk_rename` when the user saves the editor without
+    /// editing any names — `bulk_rename::plan` returns an empty run.
+    /// This is a `set_message` (not `set_error`) because the no-op
+    /// outcome is benign.
+    #[test]
+    fn bulk_rename_no_changes_msg_is_message_string() {
+        assert_eq!(
+            super::BULK_RENAME_NO_CHANGES_MSG,
+            "bulk rename: no changes",
+        );
+        assert!(
+            super::BULK_RENAME_NO_CHANGES_MSG.starts_with("bulk rename:"),
+            "message must be prefixed with the verb domain, got: {}",
+            super::BULK_RENAME_NO_CHANGES_MSG,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2458,20 +2581,12 @@ mod backup_routing_tests {
     //! automated UI suite).
     use {
         super::*,
-        crate::{
-            conf::{Conf, parse_default_flags},
-            verb::VerbStore,
-        },
         std::path::PathBuf,
     };
 
-    fn make_app_context() -> crate::app::AppContext {
-        let mut config = Conf::default();
-        let verb_store = VerbStore::new(&mut config).unwrap();
-        let launch_args = parse_default_flags("").unwrap();
-        crate::app::AppContext::from(launch_args, verb_store, &config)
-            .expect("AppContext::from must succeed with defaults")
-    }
+    // Shared with `confirm_helper_tests`; re-used here so the
+    // context-construction lives in one place.
+    use super::confirm_helper_tests::make_app_context;
 
     /// Both surviving backup internals must be findable by
     /// `get_internal()` in a fresh verb store. The trigger is reached
@@ -2631,6 +2746,88 @@ mod backup_routing_tests {
             super::BACKUP_NO_ELIGIBLE_PATHS_MSG.contains("no eligible paths"),
             "message must surface the cause, got: {}",
             super::BACKUP_NO_ELIGIBLE_PATHS_MSG,
+        );
+    }
+
+    /// Pin the canonical "no selection" error string surfaced by
+    /// `run_bulk_rename` when `collect_bulk_paths` returns empty (no
+    /// stage, no selection). The string is surfaced via `set_error`
+    /// (not `set_message`) so the severity is encoded in the API.
+    /// Sibling to `bulk_rename_no_selection_msg_is_error_string`.
+    #[test]
+    fn backup_no_selection_msg_is_error_string() {
+        assert_eq!(
+            super::BACKUP_NO_SELECTION_MSG,
+            "backup: no selection",
+        );
+        assert!(
+            super::BACKUP_NO_SELECTION_MSG.starts_with("backup:"),
+            "message must be prefixed with the verb domain, got: {}",
+            super::BACKUP_NO_SELECTION_MSG,
+        );
+        // Same "stage-agnostic" requirement as the no-eligible-paths
+        // sibling: the unified flow accepts stage or selection.
+        assert!(
+            !super::BACKUP_NO_SELECTION_MSG.contains("stage"),
+            "BACKUP_NO_SELECTION_MSG must not mention 'stage' — \
+             unified path collection covers stage and selection alike, \
+             got: {}",
+            super::BACKUP_NO_SELECTION_MSG,
+        );
+    }
+
+    /// Pin the body shape: `run_backup` paints each `BackupCopy` row as
+    /// `{src_name} → {dst_name}` (file names only). Backup destinations
+    /// are always siblings of their source — `next_free_backup_name`
+    /// only walks `src.parent()` for free `.bak` / `.bak.N` slots — so
+    /// the full path is pure noise and the file_name form matches
+    /// `bulk_rename::diff_lines`' same-parent branch.
+    ///
+    /// This test re-implements the body mapper locally so a future drift
+    /// between the helper and the production loop trips here. If a
+    /// later change moves the mapper into a shared module, replace this
+    /// local copy with a call to that helper.
+    #[test]
+    fn backup_confirm_body_shows_filenames_only() {
+        use crate::backup::{BackupCopy, BackupRun};
+
+        let run = BackupRun {
+            copies: vec![
+                BackupCopy {
+                    src: PathBuf::from("/deeply/nested/path/notes.txt"),
+                    dst: PathBuf::from("/deeply/nested/path/notes.txt.bak"),
+                },
+                BackupCopy {
+                    src: PathBuf::from("/another/dir/log.json"),
+                    dst: PathBuf::from("/another/dir/log.json.bak.3"),
+                },
+            ],
+        };
+
+        fn name_or_display(p: &std::path::Path) -> String {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| p.display().to_string())
+        }
+        let body: Vec<String> = run
+            .copies
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} → {}",
+                    name_or_display(&c.src),
+                    name_or_display(&c.dst)
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            body,
+            vec![
+                "notes.txt → notes.txt.bak".to_string(),
+                "log.json → log.json.bak.3".to_string(),
+            ],
         );
     }
 

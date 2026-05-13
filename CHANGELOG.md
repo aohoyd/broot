@@ -7,7 +7,9 @@
 - destructive verbs prompt before running: built-in `:rm` and `:trash` always confirm; `:cp`/`:mv` confirm when the destination already exists; bulk staging operations confirm the fan-out count
 - `confirm: true|false` field on verbs (parallel to `auto_exec`) lets users opt their own externals into the prompt or opt the built-ins out
 - new `:goto_bookmarks` internal verb (default key `g`) opens a single-character jump menu populated from a new `bookmarks` config section; built-in defaults: `h` (home), `d` (~/Downloads), `c` (${XDG_CONFIG_HOME} or ~/.config), `t` (trash)
-- new `:backup` internal verb (default key `alt-shift-b`) creates a backup copy of the selection or each staged path; suffix configurable via `backup_suffix` (default `.bak`), with numbered fallback `.bak.1`..`.bak.999`, never silently overwriting; 2+ staged paths show a `src → dst` ConfirmOverlay before applying
+- new `:backup` internal verb (default key `alt-shift-b`) creates a backup copy of the selection or each staged path; suffix configurable via `backup_suffix` (default `.bak`), with numbered fallback `.bak.1`..`.bak.999`, never silently overwriting; always shows a `src → dst` ConfirmOverlay before applying (single-file is a 1-element bulk operation)
+- F2 (`:bulk_rename`) now always opens `$EDITOR` followed by the confirm diff, including for single-file rename — the unified flow treats N=1 as a one-row bulk operation
+- `=`, `+`, and `ctrl-g` now stage the selection and advance to the next entry (no more toggle); `-` still unstages without advancing
 
 ### v1.56.2 - 2026-03-26
 <a name="v1.56.2"></a>
