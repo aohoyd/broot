@@ -435,15 +435,15 @@ fn build_server_name(args: &Args) -> Option<String> {
     None
 }
 
-/// Test-only helpers shared with other modules' `#[cfg(test)]` trees.
+/// Test-only helpers for this module's `#[cfg(test)]` tree.
 ///
-/// `context_with_backup_suffix` was duplicated in
-/// `src/verb/execution_builder.rs`'s test module before this hoist; the
-/// two copies were drifting on the `is_valid_backup_suffix` fallback
-/// chain. Centralising the helper here keeps the fixture stable across
-/// modules that need a non-default `AppContext::backup_suffix`.
+/// Currently houses `context_with_backup_suffix`, used only by the
+/// `tests` module below to exercise the validation + fallback logic
+/// for `backup_suffix`. No out-of-module callers — kept in a nested
+/// module purely to group fixture code separately from production
+/// items.
 #[cfg(test)]
-pub(crate) mod test_helpers {
+mod test_helpers {
     use {
         super::*,
         crate::{
@@ -455,7 +455,7 @@ pub(crate) mod test_helpers {
     /// Build an `AppContext` from a `Conf` whose only customisation is
     /// the `backup_suffix` field. Lets callers assert the validation +
     /// fallback logic without standing up a full config file.
-    pub(crate) fn context_with_backup_suffix(backup_suffix: Option<&str>) -> AppContext {
+    pub(super) fn context_with_backup_suffix(backup_suffix: Option<&str>) -> AppContext {
         let mut config = Conf {
             backup_suffix: backup_suffix.map(str::to_string),
             ..Conf::default()
@@ -514,9 +514,8 @@ mod tests {
 
     // -- backup_suffix --------------------------------------------------
 
-    // The `context_with_backup_suffix` helper is shared with
-    // `execution_builder.rs`'s test module; see
-    // `crate::app::app_context::test_helpers` below.
+    // The `context_with_backup_suffix` helper lives in the nested
+    // `test_helpers` module below.
     use super::test_helpers::context_with_backup_suffix;
 
     #[test]

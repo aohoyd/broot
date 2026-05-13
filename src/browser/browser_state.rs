@@ -46,6 +46,22 @@ enum BrowserTask {
     },
 }
 
+/// The "advance" half of the stage-and-advance fast-stager behaviour
+/// triggered by `+`, `=`, and `ctrl-g`. Extracted as a free function
+/// so the `Internal::stage | Internal::toggle_stage` arm in
+/// `on_internal` AND the unit tests that pin the arm's contract can
+/// call the same code path — without it, a regression that switched
+/// the arm to a different advance shape (cycle=true, step=-1, etc.)
+/// would still satisfy a test that only invokes `move_selection`
+/// directly.
+///
+/// `cycle=false` is load-bearing: staging the last entry must leave
+/// the cursor on the last entry, not wrap around to the root. Both
+/// arms call `move_selection(1, page_height, false)`.
+pub(crate) fn advance_after_stage(tree: &mut Tree, page_height: usize) {
+    tree.move_selection(1, page_height, false);
+}
+
 /// Decide which directory `Internal::add` should target given the
 /// currently-selected path and the panel's root.
 ///
@@ -815,6 +831,20 @@ impl PanelState for BrowserState {
                 let overlay = Overlay::Add(AddOverlay::new(target_dir));
                 CmdResult::OpenOverlay(Box::new(overlay))
             }
+            // Stage + advance: pressing `+`, `=` or `ctrl-g` stages the
+            // selection then moves the cursor down by one (non-cycling, so
+            // staging the last entry leaves the cursor at the last entry).
+            // `=` and `ctrl-g` used to bind `toggle_stage`; they now bind
+            // `stage`. To keep `:toggle_stage` callable from user conf as
+            // a no-key alias, both arms share this body (add-only +
+            // advance) inside the browser. On other panel types the
+            // toggle internal still hits the trait-default behaviour in
+            // `StageState::on_internal` / `on_internal_generic`.
+            Internal::stage | Internal::toggle_stage => {
+                let result = self.stage(app_state, cc, con);
+                advance_after_stage(self.displayed_tree_mut(), page_height);
+                result
+            }
             _ => self.on_internal_generic(
                 w,
                 invocation_parser,
@@ -1556,4 +1586,96 @@ mod tests {
     // composition with no additional logic to pin, so a separate test
     // just wrapping the helper output in `Overlay::Add` would duplicate
     // the existing coverage.
+
+    //
+    // Stage + advance tests.
+    //
+    // The `Internal::stage | Internal::toggle_stage` arm in
+    // `BrowserState::on_internal` calls `self.stage(...)` then
+    // `advance_after_stage(self.displayed_tree_mut(), page_height)`.
+    // Exercising the full arm needs a real `CmdContext` (heavy), so we
+    // call the same free function `advance_after_stage` that the arm
+    // calls — guaranteeing the test exercises the production advance
+    // shape (cycle=false, step=+1). A drift in either parameter inside
+    // the arm body shows up here because the helper is the single
+    // source of truth.
+    //
+    //   1. `advance_after_stage` advances selection by one and
+    //      saturates at the last entry (cycle=false).
+    //   2. `Stage::add` is idempotent — re-adding an already-staged path
+    //      leaves it staged, which is the "toggle_stage now acts like
+    //      stage" semantics surfaced by the BrowserState arm rewrite.
+    //
+    // The verb-store pin `stage_keys_bound_to_stage_not_toggle` covers
+    // the key-binding half of the feature.
+    //
+
+    use crate::stage::Stage;
+
+    #[test]
+    fn stage_advances_selection() {
+        // Tree with N>1 selectable children; selection starts at the
+        // first child. After the arm's advance step, selection must be
+        // at the next child.
+        let mut state = fake_browser_state_with_children(0, 4);
+        state.displayed_tree_mut().selection = 1;
+        let page_height = BrowserState::page_height(screen(24));
+        super::advance_after_stage(state.displayed_tree_mut(), page_height);
+        assert_eq!(
+            state.displayed_tree().selection,
+            2,
+            "stage arm must advance selection by one (non-cycling)",
+        );
+    }
+
+    #[test]
+    fn stage_at_last_entry_no_panic() {
+        // Selection on the last selectable line; advance with cycle=false
+        // must stay put and not wrap around to the root (selection 0).
+        let mut state = fake_browser_state_with_children(0, 4);
+        // lines = [root, child1, child2, child3, child4]
+        let last_idx = state.displayed_tree().lines.len() - 1;
+        state.displayed_tree_mut().selection = last_idx;
+        let page_height = BrowserState::page_height(screen(24));
+        super::advance_after_stage(state.displayed_tree_mut(), page_height);
+        assert_eq!(
+            state.displayed_tree().selection,
+            last_idx,
+            "advance at the last entry must be a no-op when cycle=false",
+        );
+    }
+
+    #[test]
+    fn toggle_stage_now_acts_like_stage() {
+        // Both names that resolve to the unified arm
+        // (`Internal::stage` and `Internal::toggle_stage`) call
+        // `self.stage(...)` → `Stage::add`, which is idempotent:
+        // re-staging a path leaves it in the stage. Pin both halves of
+        // the toggle-stage rewrite here — first that the path stays
+        // staged, then that the cursor advances via the SAME helper
+        // the arm uses.
+        let mut state = fake_browser_state_with_children(0, 4);
+        state.displayed_tree_mut().selection = 1;
+        let path = state.displayed_tree().selected_line().path.clone();
+        let mut stage = Stage::default();
+        stage.add(path.clone());
+        assert!(stage.contains(&path), "precondition: path is staged");
+
+        // Simulate the arm body: re-add (idempotent) then advance via
+        // the SAME free function the arm uses.
+        stage.add(path.clone());
+        let page_height = BrowserState::page_height(screen(24));
+        super::advance_after_stage(state.displayed_tree_mut(), page_height);
+
+        assert!(
+            stage.contains(&path),
+            "re-staging an already-staged path must leave it staged \
+             (toggle_stage now has add-only semantics in browser)",
+        );
+        assert_eq!(
+            state.displayed_tree().selection,
+            2,
+            "toggle_stage arm must advance like the stage arm",
+        );
+    }
 }

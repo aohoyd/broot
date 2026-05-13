@@ -272,24 +272,17 @@ impl VerbStore {
         )
         .with_auto_exec(false)
         .with_key(key!(f2));
-        // `backup` mirrors `bulk_rename`'s three-internal split:
+        // `backup` mirrors `bulk_rename`'s two-internal split:
         //   - `Internal::backup` is the keyed trigger; the App-level
-        //     intercept routes to either single-file or bulk flow
-        //     based on stage size.
-        //   - `Internal::backup_one` is the single-file receiver. Its
-        //     invocation pattern carries a `{new_filename:backup-name}`
-        //     placeholder so the input bar is prefilled with the
-        //     computed next-free backup name; `with_auto_exec(false)`
-        //     keeps the verb from firing until the user hits Enter.
+        //     intercept always plans a bulk run (N=1 when the stage is
+        //     empty and there's a single selection, otherwise N=stage)
+        //     and opens a confirm overlay.
         //   - `Internal::backup_apply` is the bulk receiver, consuming
         //     `App::pending_backup` after the confirm overlay accepts.
         //     It has no key and is hidden from docs — only reachable
         //     via the confirm overlay's `CloseAndRun` re-dispatch.
         self.add_internal(backup)
             .with_key(key!(alt - shift - b));
-        self.add_internal(backup_one)
-            .with_auto_exec(false)
-            .no_doc();
         self.add_internal(backup_apply).no_doc();
         self.add_internal_bang(start_end_panel)
             .with_key(key!(ctrl - p));
@@ -354,13 +347,18 @@ impl VerbStore {
         self.add_internal(move_from_staging)
             .with_key(key!('x'))
             .with_shortcut("mfs");
-        self.add_internal(stage).with_key(key!('+'));
+        // `+`, `=` and `ctrl-g` all bind `stage` (add-only + advance).
+        // `toggle_stage` stays registered (callable as `:toggle_stage` from
+        // user conf) but has no default key binding — see the BrowserState
+        // arms in `src/browser/browser_state.rs` for the unified semantics.
+        self.add_internal(stage)
+            .with_key(key!('+'))
+            .with_key(key!('='))
+            .with_key(key!(ctrl - g));
         self.add_internal(unstage).with_key(key!('-'));
         self.add_internal(stage_all_directories);
         self.add_internal(stage_all_files).with_key(key!(ctrl - a));
-        self.add_internal(toggle_stage)
-            .with_key(key!(ctrl - g))
-            .with_key(key!('='));
+        self.add_internal(toggle_stage);
         self.add_internal(open_staging_area).with_shortcut("osa");
         self.add_internal(close_staging_area).with_shortcut("csa");
         self.add_internal(toggle_staging_area)
@@ -1031,7 +1029,7 @@ mod vim_bindings_tests {
             (key!('x'), Internal::move_from_staging),
             (key!('o'), Internal::open_sort_overlay),
             (key!('b'), Internal::bookmarks),
-            (key!('='), Internal::toggle_stage),
+            (key!('='), Internal::stage),
             (key!('g'), Internal::select_first),
             (key!(shift - g), Internal::select_last),
             (key!('q'), Internal::quit),
@@ -1309,13 +1307,17 @@ mod vim_bindings_tests {
         );
     }
 
-    /// Pin test: all three backup internals must be registered. The
-    /// trigger `backup` is keyed (alt-shift-b); the receiver
-    /// `backup_one` is auto_exec=false (prefill flow); the bulk
+    /// Pin test: the two surviving backup internals must be registered.
+    /// The trigger `backup` is keyed (alt-shift-b); the bulk
     /// continuation `backup_apply` is unbound and hidden. Without
-    /// these registrations the alt-shift-b keystroke, the input-bar
-    /// prefill, and the confirm-overlay `CloseAndRun` re-dispatch
-    /// would all silently fail.
+    /// these registrations the alt-shift-b keystroke and the
+    /// confirm-overlay `CloseAndRun` re-dispatch would silently fail.
+    ///
+    /// Negative assertion: `backup_one` (the deleted single-file
+    /// receiver) must NOT appear in the store under its old name. If
+    /// anything ever resurrects the variant AND registers it, this
+    /// test fails so the dead receiver gets removed rather than
+    /// silently shadowing the unified flow.
     #[test]
     fn backup_internals_registered() {
         let mut conf = Conf::default();
@@ -1328,42 +1330,6 @@ mod vim_bindings_tests {
         assert!(
             trigger.has_name("backup"),
             "backup must be invocable by name",
-        );
-        let one = store
-            .verbs()
-            .iter()
-            .find(|v| v.is_internal(Internal::backup_one))
-            .expect("backup_one must be registered");
-        assert!(
-            one.has_name("backup_one"),
-            "backup_one must be invocable by name",
-        );
-        assert!(
-            !one.auto_exec,
-            "backup_one must be auto_exec=false so the prefill flow \
-             waits for the user's Enter before applying",
-        );
-        // The receiver's invocation pattern carries the
-        // `{new_filename:backup-name}` placeholder. Without it the
-        // `auto_exec:false` prefill flow can't fire — the input bar
-        // would be empty when the user lands on the verb. Pinning
-        // both the `invocation_parser` presence and the placeholder
-        // string catches a future `Internal::invocation_pattern`
-        // edit that strips the placeholder.
-        let parser = one
-            .invocation_parser
-            .as_ref()
-            .expect("backup_one must carry an invocation_parser");
-        let pattern_str = format!(
-            "{} {}",
-            parser.invocation_pattern.name,
-            parser.invocation_pattern.args.as_deref().unwrap_or(""),
-        );
-        assert!(
-            pattern_str.contains("backup-name"),
-            "backup_one's invocation pattern must mention `backup-name` \
-             (the placeholder consumed by `invocation_with_default` to \
-             prefill the input bar), got: {pattern_str:?}",
         );
         let apply = store
             .verbs()
@@ -1380,13 +1346,25 @@ mod vim_bindings_tests {
             "backup_apply must not bind any key — only reachable via \
              the confirm overlay's CloseAndRun",
         );
+        // Negative pin: the legacy single-file receiver is gone. We
+        // can't reference `Internal::backup_one` directly (the variant
+        // was removed); checking the verb's surface name catches a
+        // stray re-registration.
+        let one_present = store
+            .verbs()
+            .iter()
+            .any(|v| v.has_name("backup_one"));
+        assert!(
+            !one_present,
+            "backup_one must NOT be registered — single-file backup \
+             flows through the unified bulk path",
+        );
     }
 
     /// Dispatch-path pin test: `alt-shift-b` must resolve to the
-    /// trigger `Internal::backup`, not to either of the two receivers
-    /// (`backup_one`, `backup_apply`). Registration order matters
-    /// because `find_key_verb` returns the first verb whose `keys`
-    /// list contains the keystroke.
+    /// trigger `Internal::backup`, not to the `backup_apply` receiver.
+    /// Registration order matters because `find_key_verb` returns the
+    /// first verb whose `keys` list contains the keystroke.
     #[test]
     fn backup_keybind_resolves_to_trigger() {
         let mut conf = Conf::default();
@@ -1398,7 +1376,70 @@ mod vim_bindings_tests {
             verb.get_internal(),
             Some(Internal::backup),
             "alt-shift-b must resolve to Internal::backup (the \
-             trigger), not to backup_one or backup_apply",
+             trigger), not to backup_apply",
+        );
+    }
+
+}
+
+#[cfg(test)]
+mod staging_bindings_tests {
+    //! Pin tests for the staging-related key bindings. Kept separate
+    //! from `vim_bindings_tests` because the stage keys (`+`, `=`,
+    //! `ctrl-g`, `-`) predate the vim keymap — they were the original
+    //! broot bindings and are not part of the bare-letter Command-mode
+    //! set that `vim_bindings_tests` is about.
+    use {
+        super::*,
+        crokey::key,
+    };
+
+    /// Helper mirrored from `vim_bindings_tests::first_verb_for_key`.
+    /// Walks the verb store in registration order returning the first
+    /// verb whose `keys` list contains `key` (matches the resolution
+    /// order `find_key_verb` uses, minus the per-verb filters which
+    /// the staging keys don't carry).
+    fn first_verb_for_key(
+        store: &VerbStore,
+        key: KeyCombination,
+    ) -> Option<&Verb> {
+        store.verbs().iter().find(|v| v.keys.contains(&key))
+    }
+
+    /// Pin test: `+`, `=`, and `ctrl-g` all resolve to `Internal::stage`,
+    /// not `Internal::toggle_stage`. All three keys share the
+    /// "add-only + advance" fast-stager behaviour in BrowserState. The
+    /// `toggle_stage` internal stays registered (callable as
+    /// `:toggle_stage` from user conf) but has NO default key binding.
+    #[test]
+    fn stage_keys_bound_to_stage_not_toggle() {
+        let mut conf = Conf::default();
+        let store = VerbStore::new(&mut conf).unwrap();
+        let keys: &[KeyCombination] =
+            &[key!('+'), key!('='), key!(ctrl - g)];
+        for key in keys {
+            let verb = first_verb_for_key(&store, *key).unwrap_or_else(|| {
+                panic!("key {:?} must be bound", key)
+            });
+            assert_eq!(
+                verb.get_internal(),
+                Some(Internal::stage),
+                "key {:?} must resolve to Internal::stage (the unified \
+                 fast-stager), not to Internal::toggle_stage",
+                key,
+            );
+        }
+        // `toggle_stage` is still registered but unbound — confirm
+        // both halves of that invariant.
+        let toggle = store
+            .verbs()
+            .iter()
+            .find(|v| v.is_internal(Internal::toggle_stage))
+            .expect("toggle_stage must stay registered for :toggle_stage typed-verb use");
+        assert!(
+            toggle.keys.is_empty(),
+            "toggle_stage must not have any default key binding — \
+             the three default keys all bind `stage` now",
         );
     }
 }

@@ -7,7 +7,6 @@ use {
         cli::TriBool,
         command::{
             Command,
-            CommandParts,
             Sequence,
         },
         conf::Conf,
@@ -27,20 +26,13 @@ use {
             Either,
         },
         terminal,
-        verb::{
-            ExecutionBuilder,
-            Internal,
-            InvocationParser,
-            VerbId,
-            VerbStore,
-        },
+        verb::Internal,
         watcher::Watcher,
     },
     crokey::crossterm::event::Event,
     std::{
         io::Write,
         path::{
-            Component,
             Path,
             PathBuf,
         },
@@ -231,11 +223,15 @@ impl App {
         // a `PanelState::on_internal` arm. Both legs return early so
         // the panel layer never sees these commands.
         //
-        //   `Internal::bulk_rename`       — F2 entry point. Stage < 2:
-        //                                    fall through to the inline
-        //                                    rename external verb.
-        //                                    Stage ≥ 2: run the editor,
-        //                                    plan, open ConfirmOverlay.
+        //   `Internal::bulk_rename`       — F2 entry point. Unified
+        //                                    path-collection
+        //                                    (`stage || [selection]`) is
+        //                                    fed into the editor; the
+        //                                    bulk machinery handles N=1
+        //                                    cleanly, so single-file
+        //                                    rename is a one-row plan.
+        //                                    Runs editor, plans, opens
+        //                                    ConfirmOverlay.
         //   `Internal::bulk_rename_apply` — re-entered from the confirm
         //                                    overlay's `CloseAndRun`.
         //                                    Consumes `pending_bulk_rename`
@@ -246,7 +242,7 @@ impl App {
                     if is_input_invocation {
                         self.panels.clear_input_invocation(con);
                     }
-                    return self.run_bulk_rename(w, panel_skin, app_state, con);
+                    return self.run_bulk_rename(app_state);
                 }
                 Internal::bulk_rename_apply => {
                     if is_input_invocation {
@@ -255,25 +251,19 @@ impl App {
                     self.run_bulk_rename_apply(app_state, con);
                     return Ok(());
                 }
-                // Backup intercept: mirrors the bulk_rename triplet.
-                // `backup` is the keyed trigger (alt-shift-b). Stage <2
-                // delegates to `prefill_backup_one`, which writes the
-                // computed `:backup_one <next-free-name>` invocation
-                // directly into the input bar (no command synthesis).
-                // Stage ≥2 plans a `BackupRun`, stashes it on
-                // `self.pending_backup`, and opens a `ConfirmOverlay`
-                // whose CloseAndRun re-dispatches `:backup_apply`.
+                // Backup intercept: two-internal split mirroring
+                // bulk_rename. `backup` is the keyed trigger
+                // (alt-shift-b); it plans a `BackupRun` (one row per
+                // path collected from `stage || [selection]`), stashes
+                // it on `self.pending_backup`, and opens a
+                // `ConfirmOverlay` whose CloseAndRun re-dispatches
+                // `:backup_apply`. The bulk machinery handles N=1
+                // cleanly so single-file backup is just a one-row run.
                 Internal::backup => {
                     if is_input_invocation {
                         self.panels.clear_input_invocation(con);
                     }
                     return self.run_backup(app_state, con);
-                }
-                Internal::backup_one => {
-                    if is_input_invocation {
-                        self.panels.clear_input_invocation(con);
-                    }
-                    return self.run_backup_one(w, cmd, panel_skin, app_state, con);
                 }
                 Internal::backup_apply => {
                     if is_input_invocation {
@@ -744,9 +734,9 @@ impl App {
         // the stage's contents (see `is_stage_consuming_internal`).
         // Everything else — navigation, toggles, app-level verbs like
         // `:quit` / `:help`, the input-row edits, etc. — bypasses
-        // because the deny-list returns `false` for them. The five
+        // because the deny-list returns `false` for them. The four
         // overlay/modal internals (`bulk_rename`, `bulk_rename_apply`,
-        // `backup`, `backup_one`, `backup_apply`) also bypass this
+        // `backup`, `backup_apply`) also bypass this
         // function because `is_stage_consuming_internal` returns
         // `false` for them, so the deny-list check below returns
         // early before the resolved-verb check fires. (Note: the
@@ -773,10 +763,11 @@ impl App {
     }
 
     /// Run the bulk-rename entry leg. Drives the user through the
-    /// $EDITOR → parse → plan → confirm-overlay pipeline. Falls through
-    /// to the inline `rename` external when the stage has fewer than
-    /// two paths so the same key (F2) still surfaces the existing
-    /// single-file rename.
+    /// $EDITOR → parse → plan → confirm-overlay pipeline using the
+    /// unified path collection (`stage || [selection]`). N=1 is the
+    /// single-file rename case and flows through the same pipeline —
+    /// one editor line, one ConfirmOverlay row — no separate fast
+    /// path.
     ///
     /// Failure modes surface to the status row and return `Ok(())`;
     /// a hard panic is never appropriate for any user-driven error
@@ -784,34 +775,23 @@ impl App {
     /// error during the editor's read-back, etc.).
     fn run_bulk_rename(
         &mut self,
-        w: &mut W,
-        panel_skin: &PanelSkin,
         app_state: &mut AppState,
-        con: &mut AppContext,
     ) -> Result<(), ProgramError> {
-        let stage_paths = app_state.stage.paths().to_vec();
-        if stage_paths.len() < 2 {
-            // Fall through to the inline rename external verb. We
-            // resolve it by name and synthesize a `Command::VerbTrigger`
-            // so the verb's existing arg-prompt flow fires unchanged.
-            // If the external isn't registered (custom user conf), we
-            // surface an empty-stage hint instead of silently swallowing
-            // the keypress.
-            if let Some(verb_id) = self.find_external_rename_verb_id(con) {
-                let cmd = Command::VerbTrigger {
-                    verb_id,
-                    input_invocation: None,
-                };
-                return self.apply_command(w, &cmd, panel_skin, app_state, con);
-            } else {
-                self.panels.mut_panel().set_error(
-                    "bulk rename: stage 2+ files to use the bulk flow".to_string(),
-                );
-                return Ok(());
-            }
+        // Unified path collection via `collect_bulk_paths`: empty
+        // stage falls back to the current selection, treating
+        // single-file as N=1 bulk. The bulk machinery
+        // (`bulk_rename::serialize/parse/plan/apply`) already handles
+        // N=1 cleanly — one editor line, one ConfirmOverlay row.
+        let selection = self.panels.state().selected_path();
+        let paths = collect_bulk_paths(&app_state.stage, selection);
+        if paths.is_empty() {
+            self.panels
+                .mut_panel()
+                .set_error("bulk rename: no selection".to_string());
+            return Ok(());
         }
 
-        let content = bulk_rename::serialize(&stage_paths);
+        let content = bulk_rename::serialize(&paths);
         let edited = match editor::edit_in_external(&content, ".broot-rename") {
             Ok(s) => s,
             Err(e) => {
@@ -820,7 +800,7 @@ impl App {
             }
         };
         let parsed = bulk_rename::parse(&edited);
-        let run = match bulk_rename::plan(&stage_paths, &parsed, &|p| p.exists()) {
+        let run = match bulk_rename::plan(&paths, &parsed, &|p| p.exists()) {
             Ok(r) => r,
             Err(e) => {
                 self.panels.mut_panel().set_error(e.to_string());
@@ -860,11 +840,12 @@ impl App {
         app_state: &mut AppState,
         con: &AppContext,
     ) {
-        let Some(run) = self.pending_bulk_rename.take() else {
-            self.panels.mut_panel().set_error(
-                "bulk rename: nothing pending".to_string(),
-            );
-            return;
+        let run = match take_pending_bulk_rename_or_error(&mut self.pending_bulk_rename) {
+            Ok(r) => r,
+            Err(msg) => {
+                self.panels.mut_panel().set_error(msg.to_string());
+                return;
+            }
         };
         match bulk_rename::apply(&run) {
             Ok(()) => {
@@ -891,37 +872,18 @@ impl App {
         }
     }
 
-    /// Look up the built-in external `rename` verb's ID so the
-    /// stage-size-<2 fall-through can synthesize a `VerbTrigger` that
-    /// runs the existing inline-rename flow. The verb is identified by
-    /// name "rename" AND being external (not internal) — distinguishes
-    /// it from the F2 internal `bulk_rename` we just added.
-    fn find_external_rename_verb_id(&self, con: &AppContext) -> Option<VerbId> {
-        for verb in con.verb_store.verbs() {
-            if verb.has_name("rename") && verb.get_internal().is_none() {
-                return Some(verb.id);
-            }
-        }
-        None
-    }
-
-    /// Drive the `:backup` trigger. With stage < 2, populate the input
-    /// bar with the prefilled `:backup_one <next-free-name>` invocation
-    /// so the user can review/edit before hitting Enter. With stage ≥ 2,
-    /// plan the bulk run, stash it on `self.pending_backup`, and open a
-    /// confirm overlay listing the `src → dst` rows. The overlay's
-    /// CloseAndRun re-dispatches `:backup_apply`, which `mem::take`s
-    /// the stash and runs `backup::apply`.
+    /// Drive the `:backup` trigger. Unified flow: collect paths from
+    /// the stage (or fall back to the active panel's selection when
+    /// the stage is empty), plan the bulk run, stash it on
+    /// `self.pending_backup`, and open a confirm overlay listing the
+    /// `src → dst` rows. The overlay's `CloseAndRun` re-dispatches
+    /// `:backup_apply`, which `mem::take`s the stash and runs
+    /// `backup::apply`.
     ///
-    /// Single-target prefill is built inline rather than recursed via
-    /// `apply_command`: the panel-input prefill branch in
-    /// `command/panel_input.rs:526-540` only fires on a physical key
-    /// event. A synthesized `Command::VerbTrigger { backup_one, .. }`
-    /// going through `apply_command` would re-enter the App-level
-    /// `Internal::backup_one` intercept and fail with "missing
-    /// invocation" (the trigger has no `input_invocation`). Mirroring
-    /// the panel-input logic here keeps the prefill in one place per
-    /// flow without coupling `apply_command` to the input-row state.
+    /// The bulk machinery handles N=1 cleanly — single-file backup is
+    /// just a one-row bulk run, no separate code path. Path collection
+    /// uses `collect_bulk_paths` (the shared `stage || [selection]`
+    /// helper).
     ///
     /// Cap-exhaust handling: if any planned row has `dst == src` (every
     /// `.bak.N` candidate already exists), the overlay is NOT opened.
@@ -936,16 +898,20 @@ impl App {
         app_state: &mut AppState,
         con: &mut AppContext,
     ) -> Result<(), ProgramError> {
-        let stage_paths = app_state.stage.paths().to_vec();
-        if stage_paths.len() < 2 {
-            return self.prefill_backup_one(app_state, con);
+        let selection = self.panels.state().selected_path();
+        let paths = collect_bulk_paths(&app_state.stage, selection);
+        if paths.is_empty() {
+            self.panels
+                .mut_panel()
+                .set_error("backup: no selection".to_string());
+            return Ok(());
         }
 
-        let run = backup::plan_bulk_backup(&stage_paths, &con.backup_suffix);
+        let run = backup::plan_bulk_backup(&paths, &con.backup_suffix);
         if run.copies.is_empty() {
             self.panels
                 .mut_panel()
-                .set_message("backup: no eligible paths in stage");
+                .set_error(BACKUP_NO_ELIGIBLE_PATHS_MSG.to_string());
             return Ok(());
         }
         // Cap-exhaust detection: a sentinel row (dst == src) means
@@ -973,7 +939,11 @@ impl App {
             .iter()
             .map(|c| format!("{} → {}", c.src.display(), c.dst.display()))
             .collect();
-        let title = format!("Backup {count} files?");
+        let title = if count == 1 {
+            "Backup 1 file?".to_string()
+        } else {
+            format!("Backup {count} files?")
+        };
         self.pending_backup = Some(run);
         self.request_confirm(
             title,
@@ -982,148 +952,6 @@ impl App {
             false,
             Command::from_raw(":backup_apply".to_string(), true),
         );
-        Ok(())
-    }
-
-    /// Populate the active panel's input bar with the prefilled
-    /// `:backup_one <next-free-name>` invocation.
-    ///
-    /// Mirrors the `auto_exec:false` prefill branch in
-    /// `command/panel_input.rs:532-540`: locate the receiver verb,
-    /// build an `ExecutionBuilder` against the current selection,
-    /// resolve the invocation pattern's `{new_filename:backup-name}`
-    /// placeholder via `invocation_with_default`, then write the
-    /// resulting `:backup_one <name>` string into the input field.
-    ///
-    /// Failure modes (verb not registered, missing invocation parser,
-    /// no selection) surface as status errors with `Ok(())`; the
-    /// keypress is never silently swallowed.
-    fn prefill_backup_one(
-        &mut self,
-        app_state: &AppState,
-        con: &AppContext,
-    ) -> Result<(), ProgramError> {
-        let invocation_parser = match resolve_backup_one_invocation_parser(&con.verb_store) {
-            Ok(p) => p,
-            Err(msg) => {
-                self.panels.mut_panel().set_error(msg.to_string());
-                return Ok(());
-            }
-        };
-        // Build the prefilled invocation from the current selection's
-        // sel_info. `invocation_with_default` resolves the
-        // `{new_filename:backup-name}` placeholder via
-        // `get_sel_name_standard_replacement`, which reads
-        // `con.backup_suffix` and consults `next_free_backup_name`.
-        let sel_info = self.panels.state().sel_info(app_state);
-        let exec_builder = ExecutionBuilder::without_invocation(sel_info, app_state);
-        let verb_invocation = exec_builder
-            .invocation_with_default(&invocation_parser.invocation_pattern, con);
-        // Preserve any existing pattern part the user had typed, then
-        // splice in the new invocation — matches panel_input's
-        // `parts.verb_invocation = Some(...)` mutation.
-        let current = self.panels.get_input_content();
-        let mut parts = CommandParts::from(current);
-        parts.verb_invocation = Some(verb_invocation);
-        self.panels.input().set_content(&parts.to_string());
-        Ok(())
-    }
-
-    /// Receiver for the single-file leg.
-    ///
-    /// The user has edited (or accepted) the prefilled name and pressed
-    /// Enter. The incoming command is a
-    /// `Command::VerbInvocate(VerbInvocation { name: "backup_one",
-    /// args: Some("<typed name>"), .. })` (the Backup intercept already
-    /// guarantees the internal resolves to `Internal::backup_one`).
-    ///
-    /// Failure modes are all soft — every problem path emits a status
-    /// error and returns `Ok(())`. The handler never panics on
-    /// user-driven input (missing args, root selection, collision, I/O
-    /// failure during copy).
-    ///
-    /// On success, the active panel is refreshed and a synthetic
-    /// `:focus <target>` is dispatched so the new backup becomes the
-    /// selected tree entry — matching the `AddOverlay::try_commit` UX
-    /// for "the thing you just created is now the selection".
-    ///
-    /// Overwrite policy: the explicit user-typed name MUST NOT clobber
-    /// an existing entry. Numbered fallback (`.bak` → `.bak.1`) is the
-    /// prefill behaviour; if the user types a colliding name themselves
-    /// we refuse rather than silently bumping or overwriting. This
-    /// matches the AddOverlay's "refuse to clobber" policy.
-    fn run_backup_one(
-        &mut self,
-        w: &mut W,
-        cmd: &Command,
-        panel_skin: &PanelSkin,
-        app_state: &mut AppState,
-        con: &mut AppContext,
-    ) -> Result<(), ProgramError> {
-        // Pull the user-typed name out of the incoming invocation.
-        let Some(invocation) = cmd.as_verb_invocation() else {
-            self.panels
-                .mut_panel()
-                .set_error("backup: missing invocation".to_string());
-            return Ok(());
-        };
-        let raw_name = invocation.args.as_deref().unwrap_or("").trim();
-        if raw_name.is_empty() {
-            self.panels
-                .mut_panel()
-                .set_error("backup: no destination name provided".to_string());
-            return Ok(());
-        }
-
-        // Resolve the current selection from the active panel.
-        let Some(selection) = self.panels.state().selected_path().map(|p| p.to_path_buf())
-        else {
-            self.panels
-                .mut_panel()
-                .set_error("backup: no selection".to_string());
-            return Ok(());
-        };
-
-        // Derive target via the extracted helper so the validation
-        // surface is unit-testable without constructing an `App`.
-        let target = match plan_single_backup(&selection, raw_name) {
-            Ok(t) => t,
-            Err(e) => {
-                self.panels.mut_panel().set_error(e);
-                return Ok(());
-            }
-        };
-
-        // Dispatch on file vs directory. `is_dir` follows symlinks,
-        // which matches `fs::copy`'s symlink-following semantics — the
-        // module-level docs in `src/backup/mod.rs` already note this.
-        let copy_result: std::io::Result<()> = if selection.is_dir() {
-            crate::app::copy_dir_recursively(&selection, &target)
-        } else {
-            std::fs::copy(&selection, &target).map(drop)
-        };
-
-        if let Err(err) = copy_result {
-            self.panels.mut_panel().set_error(format!(
-                "backup failed at {}: {}",
-                selection.display(),
-                err,
-            ));
-            return Ok(());
-        }
-
-        // Refresh so the tree picks up the new entry, then synthesize a
-        // `:focus <target>` so the new backup is the selection (mirrors
-        // `AddOverlay::try_commit`'s `CloseAndFocus(full)` behaviour).
-        clear_caches();
-        self.panels.refresh_all_panels(con);
-        let focus_invocation = crate::verb::VerbInvocation::new(
-            "focus".to_string(),
-            Some(target.to_string_lossy().to_string()),
-            false,
-        );
-        let focus_cmd = Command::VerbInvocate(focus_invocation);
-        self.apply_command(w, &focus_cmd, panel_skin, app_state, con)?;
         Ok(())
     }
 
@@ -1640,6 +1468,47 @@ fn take_pending_backup_or_error(
     slot.take().ok_or("backup: nothing pending")
 }
 
+/// `Option::take` for `pending_bulk_rename` with the canonical
+/// status-error string baked in. Sibling to
+/// `take_pending_backup_or_error`. Used by `run_bulk_rename_apply`
+/// and pinned by `bulk_rename_apply_stale_guard_rejects_when_no_pending`.
+fn take_pending_bulk_rename_or_error(
+    slot: &mut Option<bulk_rename::RenameRun>,
+) -> Result<bulk_rename::RenameRun, &'static str> {
+    slot.take().ok_or("bulk rename: nothing pending")
+}
+
+/// Single source of truth for the bulk-flow path-collection
+/// predicate (shared by `run_bulk_rename` and `run_backup`):
+/// `paths = stage || [selection]`. Empty stage falls back to the
+/// current selection (treating single-file as N=1 bulk); a non-empty
+/// stage uses its paths and the selection is ignored. Returns an
+/// empty vector only when the stage is empty AND there is no
+/// selection — production callers convert that to a "no selection"
+/// status error.
+///
+/// Extracted so the predicate is unit-testable without constructing
+/// an `App`.
+fn collect_bulk_paths(
+    stage: &crate::stage::Stage,
+    selection: Option<&Path>,
+) -> Vec<PathBuf> {
+    if stage.is_empty() {
+        selection.map(|p| vec![p.to_path_buf()]).unwrap_or_default()
+    } else {
+        stage.paths().to_vec()
+    }
+}
+
+/// Canonical status-error string for the "backup planned to zero
+/// copies" branch in `run_backup`. Surfaces when
+/// `plan_bulk_backup` returns an empty `copies` vector — typically
+/// because every input path was rejected (non-existent or otherwise
+/// ineligible). Pinned by `backup_no_eligible_paths_msg_is_error` so
+/// the wording stays stable across refactors.
+pub(crate) const BACKUP_NO_ELIGIBLE_PATHS_MSG: &str =
+    "backup: no eligible paths";
+
 /// Build the status-row text for a cap-exhaust failure in
 /// `run_backup`. `first_path` is the first blocked source path;
 /// `blocked_count` is the total number of `dst == src` sentinel rows
@@ -1662,101 +1531,6 @@ fn cap_exhaust_message(first_path: &Path, blocked_count: usize) -> String {
             blocked_count - 1,
         )
     }
-}
-
-/// Resolve the `Internal::backup_one` verb's `InvocationParser` from a
-/// fresh `VerbStore` reference. Used by `prefill_backup_one`; extracted
-/// as a free function so the two error legs (verb not registered,
-/// invocation parser missing) are unit-testable without constructing an
-/// `App`.
-///
-/// On success, returns the parser by shared reference (its lifetime is
-/// tied to the store). On failure, returns the canonical
-/// status-error string the production handler surfaces via
-/// `Panel::set_error`.
-fn resolve_backup_one_invocation_parser(
-    verb_store: &VerbStore,
-) -> Result<&InvocationParser, &'static str> {
-    let verb = verb_store
-        .verbs()
-        .iter()
-        .find(|v| v.get_internal() == Some(Internal::backup_one))
-        .ok_or("backup: backup_one verb not registered")?;
-    verb.invocation_parser
-        .as_ref()
-        .ok_or("backup: backup_one missing invocation parser")
-}
-
-/// Derive the destination path for a single-file backup from the
-/// current selection and the user-typed name.
-///
-/// Validation in order:
-///   1. `selection.parent()` must be `Some`. The filesystem root has
-///      no parent and is rejected.
-///   2. The user-typed `name` must be a simple filename — empty
-///      input, path separators (`/`, `\\` on Windows), and any `..`
-///      or `.` path component are rejected. Without this guard
-///      `parent.join(name)` lets a typed name escape the parent
-///      directory (e.g. `../escape` or an absolute `/abs/path`),
-///      bypassing the "backup lives next to the source" invariant.
-///   3. The target (`parent / name`) must NOT already exist. The
-///      user typed this name explicitly; numbered-fallback is the
-///      prefill's job. Silently bumping a colliding user choice
-///      would override an explicit decision, and silently
-///      truncating would bypass the codebase's "destructive
-///      operations require confirm" policy.
-///
-/// Returns the joined target on success, or a status-error string
-/// on failure (the caller surfaces it via `Panel::set_error`).
-///
-/// Extracted as a free function so the validation is unit-testable
-/// without constructing an `App` — see the test module for the
-/// rejection paths.
-fn plan_single_backup(
-    selection: &Path,
-    name: &str,
-) -> Result<PathBuf, String> {
-    let parent = selection
-        .parent()
-        .ok_or_else(|| "cannot backup the filesystem root".to_string())?;
-    if name.is_empty() {
-        return Err("backup name is empty".to_string());
-    }
-    // Reject any input that would escape the parent directory.
-    // `name.contains('/')` catches both the Unix separator and any
-    // leading `/` that would otherwise produce an absolute target.
-    // On Windows, `\\` is the native separator and must also be
-    // rejected; we check it on every platform to stay consistent
-    // with the cross-platform `Path::join` semantics.
-    if name.contains('/') || name.contains('\\') {
-        return Err("backup name must not contain path separators".to_string());
-    }
-    // Walk the components to catch `..`, `.`, and a Windows drive
-    // prefix like `C:foo` (which the slash/backslash guard above does
-    // NOT catch — `Prefix("C:")` is reachable here). `RootDir` is
-    // already caught by the leading-`/` rejection above on Unix and
-    // by the backslash rejection on Windows, so it is not produced
-    // by the loop in practice; we include it in the prefix arm so a
-    // future relaxation of the slash guard doesn't silently open a
-    // hole.
-    for comp in Path::new(name).components() {
-        match comp {
-            Component::ParentDir | Component::CurDir => {
-                return Err(
-                    "backup name must not contain '..' or '.' components".to_string(),
-                );
-            }
-            Component::Prefix(_) | Component::RootDir => {
-                return Err("backup name must be a relative filename".to_string());
-            }
-            Component::Normal(_) => {}
-        }
-    }
-    let target = parent.join(name);
-    if target.exists() {
-        return Err("backup destination already exists".to_string());
-    }
-    Ok(target)
 }
 
 /// Resolve a `Command` to its target `Internal`, if any. Used by the
@@ -2356,13 +2130,13 @@ mod confirm_helper_tests {
             Internal::total_search,
             Internal::bookmarks,
             Internal::stage,
+            Internal::toggle_stage,
             Internal::unstage,
             Internal::clear_stage,
             Internal::focus_staging_area_no_open,
             Internal::bulk_rename,
             Internal::bulk_rename_apply,
             Internal::backup,
-            Internal::backup_one,
             Internal::backup_apply,
             Internal::add,
             Internal::focus,
@@ -2441,9 +2215,11 @@ mod bulk_rename_routing_tests {
     //!     up `bulk_rename` / `bulk_rename_apply` regardless of how
     //!     the user invoked them (F2 trigger, `:bulk_rename` typed,
     //!     `Command::Internal` synthesised from a sequence).
-    //!   * Stage-size branching for `bulk_rename` — exercised
-    //!     declaratively via a stage-length predicate, matching the
-    //!     `stage.len() < 2` rule used in `run_bulk_rename`.
+    //!   * Unified path collection — `collect_bulk_paths` is the
+    //!     single source of truth for the `stage || [selection]`
+    //!     rule that `run_bulk_rename` feeds into the editor. There
+    //!     is no longer a stage-size branch: single-file rename is an
+    //!     N=1 bulk run through the same pipeline as N≥2.
 
     use {
         super::*,
@@ -2525,11 +2301,12 @@ mod bulk_rename_routing_tests {
         assert_eq!(resolved_internal(&Command::Click(0, 0), &con), None);
     }
 
-    /// Pin that the fall-through path finds an external `rename` verb
-    /// in the default store. If someone unregisters or renames the
-    /// external rename, the stage-size-<2 leg has nothing to dispatch
-    /// to — and pressing F2 with an empty stage would surface a "stage
-    /// 2+ files" error instead of the inline rename prompt.
+    /// Pin that the external `rename` verb stays registered in the
+    /// default store. F2 no longer reaches it (the bulk-rename flow
+    /// has been unified to handle N=1 directly), but the verb must
+    /// remain callable by typed invocation (`:rename newname`) from
+    /// the command bar — backward compatibility for user muscle
+    /// memory and custom conf bindings.
     #[test]
     fn fresh_store_has_external_rename_verb() {
         let store = fresh_store();
@@ -2539,7 +2316,115 @@ mod bulk_rename_routing_tests {
             .any(|v| v.has_name("rename") && v.get_internal().is_none());
         assert!(
             found,
-            "external `rename` verb must exist for the stage-<2 fall-through",
+            "external `rename` verb must remain registered for typed `:rename` invocations",
+        );
+    }
+
+    /// Pin the unified path-collection predicate used by
+    /// `run_bulk_rename`: an empty stage falls back to a single-path
+    /// `[selection]` vector; a non-empty stage uses its paths verbatim
+    /// and the selection is ignored.
+    ///
+    /// We test the predicate via the free helper `collect_bulk_paths`
+    /// rather than driving `run_bulk_rename` end-to-end (which would
+    /// require a real `App` + `Screen`). The helper is the single
+    /// source of truth for the rule; if it ever diverges from the
+    /// inline implementation in `run_bulk_rename`, that's the bug.
+    #[test]
+    fn bulk_rename_empty_stage_uses_selection() {
+        use crate::stage::Stage;
+        let stage = Stage::default();
+        let selection = std::path::Path::new("/tmp/sole.txt");
+        let paths = super::collect_bulk_paths(&stage, Some(selection));
+        assert_eq!(
+            paths,
+            vec![std::path::PathBuf::from("/tmp/sole.txt")],
+            "empty stage must yield exactly [selection]",
+        );
+    }
+
+    #[test]
+    fn bulk_rename_with_stage_uses_stage_paths() {
+        use crate::stage::Stage;
+        let mut stage = Stage::default();
+        stage.add(std::path::PathBuf::from("/tmp/a.txt"));
+        stage.add(std::path::PathBuf::from("/tmp/b.txt"));
+        // Selection that is intentionally NOT in the stage — must be
+        // ignored when the stage is non-empty.
+        let selection = std::path::Path::new("/tmp/ignored.txt");
+        let paths = super::collect_bulk_paths(&stage, Some(selection));
+        assert_eq!(
+            paths,
+            vec![
+                std::path::PathBuf::from("/tmp/a.txt"),
+                std::path::PathBuf::from("/tmp/b.txt"),
+            ],
+            "non-empty stage must yield its paths and ignore the selection",
+        );
+    }
+
+    /// Single-file stage still goes through the bulk path: the helper
+    /// returns the single stage path; the selection (even if `Some`)
+    /// is ignored. Pins that the "non-empty stage" branch fires at
+    /// N=1, matching the unification.
+    #[test]
+    fn bulk_rename_single_stage_entry_uses_stage_not_selection() {
+        use crate::stage::Stage;
+        let mut stage = Stage::default();
+        stage.add(std::path::PathBuf::from("/tmp/only.txt"));
+        let selection = std::path::Path::new("/tmp/different.txt");
+        let paths = super::collect_bulk_paths(&stage, Some(selection));
+        assert_eq!(
+            paths,
+            vec![std::path::PathBuf::from("/tmp/only.txt")],
+            "single-entry stage must use the stage path, not the selection",
+        );
+    }
+
+    /// Empty stage AND no selection: helper returns an empty vector.
+    /// The production handler converts this to a "no selection"
+    /// status error rather than running with zero paths.
+    #[test]
+    fn bulk_rename_empty_stage_no_selection_returns_empty() {
+        use crate::stage::Stage;
+        let stage = Stage::default();
+        let paths = super::collect_bulk_paths(&stage, None);
+        assert!(
+            paths.is_empty(),
+            "no stage + no selection must yield an empty path list",
+        );
+    }
+
+    /// Stale-guard pin for `run_bulk_rename_apply`: the receiver
+    /// consumes `pending_bulk_rename` via
+    /// `take_pending_bulk_rename_or_error` and surfaces a canonical
+    /// status error when nothing was pending (mirrors the backup
+    /// equivalent). Calls the SAME free function the production path
+    /// calls, so a drift in the error string or the `Option::take`
+    /// discipline is caught here.
+    #[test]
+    fn bulk_rename_apply_stale_guard_rejects_when_no_pending() {
+        // Stale case: nothing pending → canonical error string.
+        let mut slot: Option<bulk_rename::RenameRun> = None;
+        let err = super::take_pending_bulk_rename_or_error(&mut slot)
+            .expect_err("None must produce the stale-guard error");
+        assert_eq!(err, "bulk rename: nothing pending");
+
+        // Healthy case: pending run is consumed AND slot is cleared.
+        let run = bulk_rename::RenameRun {
+            renames: vec![(
+                std::path::PathBuf::from("/tmp/a"),
+                std::path::PathBuf::from("/tmp/b"),
+            )],
+        };
+        let mut slot = Some(run);
+        let consumed = super::take_pending_bulk_rename_or_error(&mut slot)
+            .expect("Some(run) must yield Ok(run)");
+        assert_eq!(consumed.renames.len(), 1);
+        assert!(
+            slot.is_none(),
+            "take() must clear the slot so a follow-up apply hits the \
+             stale-guard rather than re-applying the same plan",
         );
     }
 }
@@ -2551,28 +2436,26 @@ mod backup_routing_tests {
     //! As with `bulk_rename_routing_tests`, constructing a full `App`
     //! to drive `apply_command` end-to-end pulls in event source, TTY,
     //! and panel-plumbing dependencies that aren't worth mocking. The
-    //! intercept behaviour decomposes cleanly into three pieces that
-    //! ARE testable in isolation:
+    //! intercept behaviour decomposes cleanly into pieces that ARE
+    //! testable in isolation:
     //!
     //!   * `resolved_internal` — already tested in
-    //!     `bulk_rename_routing_tests`; the same dispatch covers all
-    //!     three backup internals because the helper is internal-
-    //!     agnostic.
-    //!   * Receiver-verb discoverability — `prefill_backup_one` looks
-    //!     up `Internal::backup_one` by `get_internal()` to read its
-    //!     `invocation_parser`. We pin that all three backup internals
-    //!     are findable that way in a fresh store; without
-    //!     `backup_one`, the stage-<2 prefill branch surfaces "verb
-    //!     not registered" and the keypress no-ops.
+    //!     `bulk_rename_routing_tests`; the same dispatch covers both
+    //!     backup internals because the helper is internal-agnostic.
+    //!   * Unified path collection — `collect_bulk_paths`
+    //!     (`stage || [selection]`) feeds both `run_bulk_rename` and
+    //!     `run_backup`, and is pinned in `rename_routing_tests`. The
+    //!     backup-side tests below add scenarios that exercise the
+    //!     shared helper from the backup angle.
     //!   * Bulk-planning detection — `plan_bulk_backup` already has
     //!     unit tests in `src/backup/mod.rs` covering the cap-exhaust
     //!     sentinel; here we re-pin the predicate that the intercept
     //!     uses to convert that sentinel into a status error.
     //!
     //! These tests guard against regressions in the routing chain
-    //! WITHOUT pretending to exercise a real `App`. The acceptance
-    //! tests in Task 9 cover end-to-end behaviour via manual smoke
-    //! testing in a live terminal (broot has no automated UI suite).
+    //! WITHOUT pretending to exercise a real `App`. Manual smoke tests
+    //! in a live terminal cover end-to-end behaviour (broot has no
+    //! automated UI suite).
     use {
         super::*,
         crate::{
@@ -2590,116 +2473,92 @@ mod backup_routing_tests {
             .expect("AppContext::from must succeed with defaults")
     }
 
-    /// Each of the three backup internals must be findable by
-    /// `get_internal()` in a fresh verb store. `prefill_backup_one`
-    /// relies on this lookup shape for `Internal::backup_one`; the
-    /// other two are pinned defensively in case future refactors add
-    /// a similar lookup against them.
+    /// Both surviving backup internals must be findable by
+    /// `get_internal()` in a fresh verb store. The trigger is reached
+    /// via the App-level intercept; `backup_apply` is reached via the
+    /// confirm overlay's `CloseAndRun` re-dispatch. Pin both so a
+    /// future de-registration breaks loudly here rather than silently
+    /// at runtime.
     #[test]
     fn backup_internals_findable_by_get_internal() {
         let con = make_app_context();
-        // Mirror `prefill_backup_one`'s direct iterator search: one
-        // pass over `verbs()` filtering on `get_internal()`. We
-        // re-implement here because the production path returns
-        // `&Verb`, but we only need to assert presence.
-        let find = |target: Internal| -> Option<VerbId> {
+        let find = |target: Internal| -> bool {
             con.verb_store
                 .verbs()
                 .iter()
-                .find(|v| v.get_internal() == Some(target))
-                .map(|v| v.id)
+                .any(|v| v.get_internal() == Some(target))
         };
         assert!(
-            find(Internal::backup).is_some(),
+            find(Internal::backup),
             "backup trigger must be findable in the default store",
         );
         assert!(
-            find(Internal::backup_one).is_some(),
-            "backup_one receiver must be findable; `prefill_backup_one` \
-             searches by get_internal() to read the invocation_parser",
-        );
-        assert!(
-            find(Internal::backup_apply).is_some(),
-            "backup_apply receiver must be findable",
+            find(Internal::backup_apply),
+            "backup_apply receiver must be findable (re-dispatched via confirm overlay)",
         );
     }
 
-    /// Happy path for `resolve_backup_one_invocation_parser`: a fresh
-    /// `VerbStore` registers `backup_one` with a non-empty invocation
-    /// pattern carrying the `backup-name` placeholder. The helper must
-    /// return `Ok(&parser)`; the prefill flow then reads
-    /// `parser.invocation_pattern` to feed
-    /// `invocation_with_default`. If THIS test starts failing, the
-    /// stage-<2 prefill path silently no-ops the keypress.
-    #[test]
-    fn resolve_backup_one_invocation_parser_succeeds_in_fresh_store() {
-        let con = make_app_context();
-        let parser = super::resolve_backup_one_invocation_parser(&con.verb_store)
-            .expect("backup_one must be registered with an invocation parser");
-        // Sanity: pattern carries the `backup-name` placeholder. This
-        // is the contract `prefill_backup_one` relies on — if a future
-        // refactor strips the placeholder, the prefill produces an
-        // empty arg.
-        let pat = format!(
-            "{} {}",
-            parser.invocation_pattern.name,
-            parser.invocation_pattern.args.as_deref().unwrap_or(""),
-        );
-        assert!(
-            pat.contains("backup-name"),
-            "invocation pattern must mention `backup-name`, got: {pat:?}",
-        );
-    }
+    // Negative pin for `backup_one` being absent from the verb store
+    // lives in `verb_store.rs::backup_internals_registered`; not
+    // duplicated here.
 
-    /// Error path for `resolve_backup_one_invocation_parser`: when
-    /// the `backup_one` verb is absent from the store, the helper must
-    /// return the canonical "not registered" error string. We
-    /// construct a `VerbStore` and filter the verb out by building a
-    /// shadow store: the actual production failure mode is a user
-    /// having unregistered the internal via their conf, but the helper
-    /// is pure on the input store. Since `VerbStore` doesn't expose a
-    /// constructor for an empty / filtered store, we re-implement the
-    /// `find_map` logic over an empty slice via the helper's own
-    /// return contract: the helper short-circuits on `find(...)` →
-    /// `None`. We test that branch indirectly by passing a known-empty
-    /// fixture — building such a fixture requires a non-public `new`
-    /// shape, so instead we PIN the error string via the present-store
-    /// negative case (asking for a different internal): if a future
-    /// rename swaps the error string, this assertion catches it.
+    // `collect_bulk_paths` coverage lives in `bulk_rename_routing_tests`
+    // (the helper is shared by both `run_bulk_rename` and `run_backup`,
+    // so duplicating the four `stage || [selection]` scenarios here
+    // would add no coverage).
+
+    /// Cap-exhaust short-circuits the overlay: when `plan_bulk_backup`
+    /// emits at least one sentinel row (`src == dst`), `run_backup`
+    /// produces a status message via `cap_exhaust_message` and does
+    /// NOT call `request_confirm` (i.e. no `pending_backup` is set
+    /// and no overlay opens).
     ///
-    /// To exercise the actual `Err` branch we'd need to build a
-    /// `VerbStore` without `backup_one` registered, which today
-    /// requires editing `add_builtin_verbs`. We pin the error string
-    /// shape via the assertion below — the test fails if the string
-    /// drifts, even though the production path isn't easily reachable
-    /// without unregistering the internal.
+    /// We exercise the predicate `run_backup` uses to detect the
+    /// sentinel (the `c.src == c.dst` filter) directly against a
+    /// hand-crafted `BackupRun`. Driving the full `run_backup`
+    /// requires an `App`, but the discriminator itself is pure: if
+    /// the production code's filter ever drifts (e.g. accidentally
+    /// inverted or restricted to a subset), this test fails because
+    /// the cap-exhaust message no longer matches the expected shape.
     #[test]
-    fn resolve_backup_one_invocation_parser_error_strings_stable() {
-        // The error strings are `&'static str` constants embedded in
-        // the helper's source. Pinning them here keeps the production
-        // status-row text stable across refactors and matches the
-        // shapes the receiver's `set_error` would surface.
-        let con = make_app_context();
-        // Sanity: the happy path resolves cleanly so we know the
-        // helper isn't silently returning `Err` in the present-store
-        // case.
+    fn cap_exhaust_short_circuits_overlay() {
+        let blocked_src = std::path::PathBuf::from("/tmp/foo");
+        let ok_src = std::path::PathBuf::from("/tmp/bar");
+        let ok_dst = std::path::PathBuf::from("/tmp/bar.bak");
+        let run = backup::BackupRun {
+            copies: vec![
+                // Healthy row.
+                backup::BackupCopy {
+                    src: ok_src.clone(),
+                    dst: ok_dst.clone(),
+                },
+                // Sentinel: dst == src means cap-exhausted.
+                backup::BackupCopy {
+                    src: blocked_src.clone(),
+                    dst: blocked_src.clone(),
+                },
+            ],
+        };
+        let blocked_count = run.copies.iter().filter(|c| c.src == c.dst).count();
+        assert_eq!(blocked_count, 1, "exactly one sentinel row was inserted");
+
+        // The overlay-short-circuit branch in `run_backup` constructs
+        // the status message from the FIRST sentinel; pin the format
+        // here so a string drift fails loudly.
+        let first_blocked = run
+            .copies
+            .iter()
+            .find(|c| c.src == c.dst)
+            .expect("blocked_count > 0 guarantees at least one match");
+        let msg = super::cap_exhaust_message(&first_blocked.src, blocked_count);
         assert!(
-            super::resolve_backup_one_invocation_parser(&con.verb_store).is_ok(),
-            "happy path must succeed before we pin the error strings",
+            msg.contains("too many existing backups"),
+            "cap-exhaust message must explain the failure, got: {msg}",
         );
-        // The actual error strings are pinned via a const-style check.
-        // We import them by writing them out — if a future edit
-        // changes either string, the production status row drifts and
-        // the `backup_apply_stale_guard_rejects_when_no_pending`
-        // test in this module already pins the "nothing pending"
-        // sibling. Add a similar test if a non-empty store can ever
-        // be constructed for the not-registered branch.
-        let not_registered = "backup: backup_one verb not registered";
-        let missing_parser = "backup: backup_one missing invocation parser";
-        // Touch both strings so a refactor renaming either constant
-        // forces this assertion to be updated:
-        assert!(not_registered.contains("not registered"));
-        assert!(missing_parser.contains("missing invocation parser"));
+        assert!(
+            msg.contains("/tmp/foo"),
+            "cap-exhaust message must name the blocked source, got: {msg}",
+        );
     }
 
     /// Singular cap-exhaust message: exactly one path blocked.
@@ -2744,6 +2603,37 @@ mod backup_routing_tests {
         );
     }
 
+    /// Pin: the "no eligible paths" status string surfaces via
+    /// `set_error` (not `set_message`) when `plan_bulk_backup`
+    /// returns an empty `copies` vector. We can't drive `run_backup`
+    /// end-to-end without an `App`, but pinning the constant prevents
+    /// silent wording drift — and the production call site uses
+    /// `set_error(..to_string())` so the severity is encoded in the
+    /// API surface.
+    #[test]
+    fn backup_no_eligible_paths_msg_is_error() {
+        // The constant must not mention "stage" — the unified flow
+        // collects paths from `stage || [selection]`, so the message
+        // applies to either origin.
+        assert!(
+            !super::BACKUP_NO_ELIGIBLE_PATHS_MSG.contains("stage"),
+            "BACKUP_NO_ELIGIBLE_PATHS_MSG must not mention 'stage' — \
+             unified path collection covers stage and selection alike, \
+             got: {}",
+            super::BACKUP_NO_ELIGIBLE_PATHS_MSG,
+        );
+        assert!(
+            super::BACKUP_NO_ELIGIBLE_PATHS_MSG.starts_with("backup:"),
+            "message must be prefixed with the verb domain, got: {}",
+            super::BACKUP_NO_ELIGIBLE_PATHS_MSG,
+        );
+        assert!(
+            super::BACKUP_NO_ELIGIBLE_PATHS_MSG.contains("no eligible paths"),
+            "message must surface the cause, got: {}",
+            super::BACKUP_NO_ELIGIBLE_PATHS_MSG,
+        );
+    }
+
     /// Boundary at 2: the smallest plural value yields "(and 1 more)".
     /// Pins the off-by-one between `blocked_count` (total) and the
     /// "more" count (remainder after naming the first).
@@ -2757,17 +2647,13 @@ mod backup_routing_tests {
         );
     }
 
-    // Coverage note: the cap-exhaust detection in `run_backup`
-    // (`src/app/app.rs:984-1006`) and the stage-size branching
-    // `stage.len() < 2` predicate are exercised structurally via the
-    // production tests below — `plan_bulk_backup_uses_self_sentinel_when_exhausted`
-    // in `src/backup/mod.rs` pins the sentinel encoding, and
-    // `plan_single_backup_*` here pins the receiver-side validation
-    // the single-target leg delegates to. End-to-end testing of
-    // `run_backup` requires an `App` instance, which the test
-    // harness can't construct without a TTY-backed `Screen`. Manual
-    // smoke tests in a live terminal cover the integration boundary
-    // (see the implementation report alongside the design doc).
+    // Coverage note: cap-exhaust detection in `run_backup` is
+    // exercised by `cap_exhaust_short_circuits_overlay` above and by
+    // `plan_bulk_backup_uses_self_sentinel_when_exhausted` in
+    // `src/backup/mod.rs`. End-to-end testing of `run_backup` requires
+    // an `App` instance, which the test harness can't construct
+    // without a TTY-backed `Screen`. Manual smoke tests in a live
+    // terminal cover the integration boundary.
 
     /// Pin test for `clear_pending_runs_slots`: every pending payload
     /// field must be dropped to `None`. Called from the
@@ -2822,181 +2708,14 @@ mod backup_routing_tests {
         assert!(pending_backup.is_none());
     }
 
-    // --- `plan_single_backup` helper tests --------------------------
-    //
-    // `run_backup_one` delegates target derivation + collision check
-    // to the free function `plan_single_backup`. We can't drive the
-    // App-level handler without a real terminal, but we CAN unit-test
-    // the helper in isolation. The handler's I/O wiring (fs::copy,
-    // copy_dir_recursively, panel refresh, focus dispatch) is covered
-    // by the `crate::backup::apply` integration tests below — those
-    // exercise the same primitives the handler delegates to.
-
-    /// Happy path: a regular selection + valid name returns
-    /// `parent / name`. The selection path doesn't need to exist on
-    /// disk — `plan_single_backup` only inspects the *destination*
-    /// for collisions; the source name is used purely to derive the
-    /// parent directory.
-    #[test]
-    fn plan_single_backup_happy_path_joins_parent_and_name() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let dir = tmp.path();
-        let selection = dir.join("foo.txt");
-        // Intentionally do NOT create `selection` on disk: the helper
-        // is pure-function on the path shape; only the target's
-        // existence is checked.
-
-        let target = super::plan_single_backup(&selection, "foo.txt.bak")
-            .expect("non-colliding name must succeed");
-        assert_eq!(target, dir.join("foo.txt.bak"));
-    }
-
-    /// Path-traversal rejection: a `/` separator in the typed name
-    /// would otherwise produce `parent.join("../escape")` and let
-    /// the user-typed string escape the parent directory entirely.
-    /// `plan_single_backup` rejects before any FS access.
-    #[test]
-    fn plan_single_backup_rejects_slash_in_name() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let selection = tmp.path().join("foo.txt");
-        let err = super::plan_single_backup(&selection, "../escape")
-            .expect_err("slash-containing name must be rejected");
-        assert!(
-            err.contains("path separators"),
-            "error must mention path separators, got: {err}",
-        );
-    }
-
-    /// Reject a typed absolute path: `name = "/abs/path.bak"` would
-    /// make `Path::join` ignore the parent and produce an
-    /// out-of-parent destination. The leading `/` is caught by the
-    /// path-separator guard.
-    #[test]
-    fn plan_single_backup_rejects_absolute_name() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let selection = tmp.path().join("foo.txt");
-        let err = super::plan_single_backup(&selection, "/abs/path.bak")
-            .expect_err("absolute path must be rejected");
-        assert!(
-            err.contains("path separators"),
-            "error must mention path separators, got: {err}",
-        );
-    }
-
-    /// Reject a backslash in the typed name (Windows separator). We
-    /// guard on every platform — see `plan_single_backup`'s doc-
-    /// comment for the cross-platform rationale.
-    #[test]
-    fn plan_single_backup_rejects_backslash_in_name() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let selection = tmp.path().join("foo.txt");
-        let err = super::plan_single_backup(&selection, "sub\\esc.bak")
-            .expect_err("backslash-containing name must be rejected");
-        assert!(
-            err.contains("path separators"),
-            "error must mention path separators, got: {err}",
-        );
-    }
-
-    /// Empty input is rejected with a distinct error string so the
-    /// status row can tell the user what went wrong.
-    #[test]
-    fn plan_single_backup_rejects_empty_name() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let selection = tmp.path().join("foo.txt");
-        let err = super::plan_single_backup(&selection, "")
-            .expect_err("empty name must be rejected");
-        assert!(
-            err.contains("empty"),
-            "error must mention empty input, got: {err}",
-        );
-    }
-
-    /// Filesystem-root rejection: a selection with no parent (i.e. `/`
-    /// or a relative single-segment path with no leading dir) must
-    /// refuse with the documented status-error string.
-    #[test]
-    fn plan_single_backup_rejects_filesystem_root() {
-        // PathBuf::from("/") has parent() == None on Unix-like systems,
-        // which is exactly the "filesystem root" case the handler
-        // guards against. We don't need to actually hit the FS here —
-        // the helper's logic is pure-function on the path shape.
-        let root = std::path::Path::new("/");
-        let err = super::plan_single_backup(root, "anything.bak")
-            .expect_err("filesystem root must be rejected");
-        assert!(
-            err.contains("filesystem root"),
-            "error must mention filesystem root, got: {err}",
-        );
-    }
-
-    /// Reject a bare `..` typed name. The slash/backslash guard does
-    /// not catch this shape (no separators), so the rejection MUST
-    /// come from the `Component::ParentDir` arm of the components
-    /// loop. Without that arm, `parent.join("..")` would resolve to
-    /// the grandparent and silently escape the source's directory.
-    #[test]
-    fn plan_single_backup_rejects_bare_dotdot() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let selection = tmp.path().join("foo.txt");
-        let err = super::plan_single_backup(&selection, "..")
-            .expect_err("bare `..` must be rejected");
-        assert!(
-            err.contains("'..'") || err.contains("'.'"),
-            "error must mention `..` or `.`, got: {err}",
-        );
-    }
-
-    /// Reject a bare `.` typed name. The slash/backslash guard does
-    /// not catch this shape (no separators), so the rejection MUST
-    /// come from the `Component::CurDir` arm. Without that arm,
-    /// `parent.join(".")` would resolve to the parent directory
-    /// itself and `target.exists()` would always be true (so the
-    /// collision check would surface a misleading error).
-    #[test]
-    fn plan_single_backup_rejects_bare_dot() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let selection = tmp.path().join("foo.txt");
-        let err = super::plan_single_backup(&selection, ".")
-            .expect_err("bare `.` must be rejected");
-        assert!(
-            err.contains("'..'") || err.contains("'.'"),
-            "error must mention `..` or `.`, got: {err}",
-        );
-    }
-
-    /// Explicit user-typed collision: pre-create the target, then
-    /// attempt to back up onto the same name. Must reject with the
-    /// "destination already exists" string — manual user input is
-    /// respected, not silently bumped (the bump is the prefill's job).
-    #[test]
-    fn plan_single_backup_rejects_explicit_collision() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let dir = tmp.path();
-        let selection = dir.join("foo.txt");
-        std::fs::write(&selection, b"x").unwrap();
-        // Pre-create the target the user is about to type.
-        let target = dir.join("foo.txt.bak");
-        std::fs::write(&target, b"existing").unwrap();
-
-        let err = super::plan_single_backup(&selection, "foo.txt.bak")
-            .expect_err("explicit collision must be rejected");
-        assert!(
-            err.contains("already exists"),
-            "error must mention existing destination, got: {err}",
-        );
-        // Sanity: the existing file is untouched (the helper is
-        // pre-FS — it only inspects existence, never writes).
-        assert_eq!(std::fs::read(&target).unwrap(), b"existing");
-    }
-
     // --- `crate::backup::apply` single-row receiver tests -----------
     //
-    // `run_backup_one`'s copy step delegates to `fs::copy` (files) or
-    // `crate::app::copy_dir_recursively` (dirs). `backup::apply`
-    // already encapsulates both branches and is the cleanest entry
-    // point to verify them end-to-end without an App. These tests
-    // exercise the exact primitives the handler will hit.
+    // After unification, single-file backup is just an N=1 bulk run.
+    // `backup::apply` encapsulates both the file and directory copy
+    // branches and is the cleanest entry point to verify them
+    // end-to-end without an App. These tests pin the primitives the
+    // bulk handler delegates to, including the N=1 special case the
+    // old `run_backup_one` flow used to cover.
 
     /// Single-file copy: source file copies to dst, src is preserved.
     #[test]

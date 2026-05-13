@@ -119,13 +119,13 @@ other name creates a regular file. The modal refuses to overwrite an
 existing entry — pick a different name, or delete the existing entry
 first.
 
-With two or more paths staged, press <kbd>F2</kbd> to open them in
-`$EDITOR` for bulk rename. Edit the destination names, save and quit
-the editor, then confirm the diff to apply. The confirm modal shows
-a compact diff (basenames only for same-parent renames, full paths
-for cross-directory moves); long path pairs soft-wrap and the modal
-grows to fit. With zero or one staged path, <kbd>F2</kbd> opens the
-existing inline rename prompt.
+Press <kbd>F2</kbd> to open the rename flow. With zero or one staged
+path the editor opens with a single line (the selection); with two or
+more staged paths it opens with one line per path. Edit the
+destination names, save and quit the editor, then confirm the diff to
+apply. The confirm modal shows a compact diff (basenames only for
+same-parent renames, full paths for cross-directory moves); long path
+pairs soft-wrap and the modal grows to fit.
 
 ## Bookmarks
 
@@ -169,7 +169,7 @@ Bare letters (Command mode only):
 | `n` / `N` | next / previous match |
 | `q` | quit |
 | `R` | refresh |
-| `=` | toggle staging of selection |
+| `=` / <kbd>ctrl</kbd><kbd>g</kbd> | stage selection and advance to next entry |
 
 Alt-modifier (both modes):
 
@@ -186,7 +186,7 @@ Alt-modifier (both modes):
 | <kbd>alt</kbd><kbd>t</kbd> | toggle tree visibility |
 | <kbd>alt</kbd><kbd>b</kbd> | open bookmarks modal |
 | <kbd>alt</kbd><kbd>n</kbd> | create new file or directory |
-| <kbd>alt</kbd><kbd>shift</kbd><kbd>b</kbd> | backup selection (copies to `<name>.bak`, configurable via `backup_suffix`). With 2+ staged paths, shows a confirm diff before copying. |
+| <kbd>alt</kbd><kbd>shift</kbd><kbd>b</kbd> | backup selection (copies to `<name>.bak`, configurable via `backup_suffix`); always shows a `src → dst` confirm diff before copying (single-file is a 1-element bulk run) |
 | <kbd>alt</kbd><kbd>↓</kbd> / <kbd>alt</kbd><kbd>↑</kbd> | next / previous sibling at same depth |
 | <kbd>shift</kbd><kbd>↓</kbd> / <kbd>shift</kbd><kbd>↑</kbd> | next / previous directory (skipping files) |
 
@@ -204,6 +204,9 @@ giving you 52 letter bindings.
   status). Git status filtering moved to <kbd>alt</kbd><kbd>G</kbd>.
 - Bookmarks are case-sensitive: a config `key: h` no longer matches
   Shift+H. Add a separate `key: H` entry if you want both.
+- `=` and <kbd>ctrl</kbd><kbd>g</kbd> no longer toggle staging off —
+  they now stage-and-advance (add-only), matching `+`. Use `-` to
+  unstage.
 
 Re-bind in `conf.hjson` if you prefer the old behavior.
 
