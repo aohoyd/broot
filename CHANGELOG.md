@@ -1,4 +1,5 @@
-### next
+### v2.0.0 - 2026.05.14
+<a name="v2.0.0"></a>
 - fix control characters sometimes remaining in the terminal after broot exit
 - nushell: rename br module to avoid conflict in last nushell version - Fix #1138 - Thanks @paulhey
 - elio-style rounded panel frames with the panel's tree-root path embedded in the top edge
@@ -10,6 +11,14 @@
 - new `:backup` internal verb (default key `alt-shift-b`) creates a backup copy of the selection or each staged path; suffix configurable via `backup_suffix` (default `.bak`), with numbered fallback `.bak.1`..`.bak.999`, never silently overwriting; always shows a `src → dst` ConfirmOverlay before applying (single-file is a 1-element bulk operation)
 - F2 (`:bulk_rename`) now always opens `$EDITOR` followed by the confirm diff, including for single-file rename — the unified flow treats N=1 as a one-row bulk operation
 - `=`, `+`, and `ctrl-g` now stage the selection and advance to the next entry (no more toggle); `-` still unstages without advancing
+
+### v1.56.4 - 2026-05-14
+<a name="v1.56.4"></a>
+- fix compilation on non unix platforms (1.56.3 isn't available on those systems)
+
+### v1.56.3 - 2026-05-13
+<a name="v1.56.3"></a>
+- `:open_stay` on the staging area opens every staged file through the system opener - Fix #444 - Thanks @ChrisJr404
 
 ### v1.56.2 - 2026-03-26
 <a name="v1.56.2"></a>
