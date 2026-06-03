@@ -37,7 +37,7 @@ That's what makes it usable, where the old `tree` command would produce pages of
 
 `.gitignore` files are properly dealt with to put unwanted files out of your way.
 
-As you sometimes want to see gitignored files, or hidden ones, you'll soon get used to the <kbd>alt</kbd><kbd>i</kbd> and <kbd>alt</kbd><kbd>h</kbd> shortcuts to toggle those visibilities.
+As you sometimes want to see gitignored files, or hidden ones, you'll soon get used to the <kbd>alt</kbd><kbd>i</kbd> and <kbd>alt</kbd><kbd>.</kbd> shortcuts to toggle those visibilities.
 
 (you can ignore them though, see [documentation](https://dystroy.org/broot/navigation/#toggles)).
 
@@ -56,12 +56,11 @@ Broot is fast and doesn't block (any keystroke interrupts the current search to 
 Most useful keys for this:
 
 * the letters of what you're looking for
-* <kbd>enter</kbd> on the root line to go up to the parent (staying in broot)
 * <kbd>enter</kbd> to focus a directory (staying in broot)
-* <kbd>esc</kbd> to get back to the previous state or clear your search
+* <kbd>esc</kbd> to get back to the previous state or clear your search (also walks up to the parent when the search is empty)
 * <kbd class=b>↓</kbd> and <kbd class=b>↑</kbd> may be used to move the selection
 * <kbd>alt</kbd><kbd>enter</kbd> to get back to the shell, having `cd` to the selected directory
-* <kbd>alt</kbd><kbd>h</kbd> to toggle showing hidden files (the ones whose name starts with a dot)
+* <kbd>alt</kbd><kbd>.</kbd> to toggle showing hidden files (the ones whose name starts with a dot)
 * <kbd>alt</kbd><kbd>i</kbd> to toggle showing gitignored files
 * `:q` if you just want to quit (you can use <kbd>ctrl</kbd><kbd>q</kbd> if you prefer)
 
@@ -101,6 +100,133 @@ Move, copy, rm, mkdir, are built in, and you can add your own shortcuts.
 Here's chmod:
 
 ![chmod](website/src/img/20230930-chmod.png)
+
+Destructive verbs (`:rm`, `:trash`) now prompt for confirmation before
+running. `:cp` and `:mv` prompt when the destination already exists,
+and bulk operations on the staging area confirm the fan-out count
+before fanning out.
+
+You can opt your own external verbs into this prompt with
+`confirm: true` in `conf.hjson`, or opt the built-ins out with
+`confirm: false`. The `confirm` field sits next to `auto_exec` in the
+verb block (see [Verb definition attributes](https://dystroy.org/broot/conf_verbs/#verb-definition-attributes)
+on the docs site).
+
+Press <kbd>alt</kbd><kbd>n</kbd> to create a new file or directory
+inside the currently selected directory (or alongside the current
+selection if it is a file). A trailing slash creates a directory; any
+other name creates a regular file. The modal refuses to overwrite an
+existing entry — pick a different name, or delete the existing entry
+first.
+
+Press <kbd>F2</kbd> to open the rename flow. With zero or one staged
+path the editor opens with a single line (the selection); with two or
+more staged paths it opens with one line per path. Edit the
+destination names, save and quit the editor, then confirm the diff to
+apply. The confirm modal shows a compact diff (basenames only for
+same-parent renames, full paths for cross-directory moves); long path
+pairs soft-wrap and the modal grows to fit.
+
+## Bookmarks
+
+Press <kbd>alt</kbd><kbd>b</kbd> from the tree to open the bookmarks
+modal. Each entry is a single-character shortcut bound to a path; hit
+the key and broot jumps there. The built-in defaults are `h` (home),
+`d` (`~/Downloads`), `c` (`$XDG_CONFIG_HOME` or `~/.config`), and
+`t` (trash).
+
+The single-char bookmark keys are scoped *inside* the modal — a
+single-char jump (e.g. `h` while the modal is open focuses Home,
+but `h` from the tree still triggers `:parent`).
+
+Customize the bookmark list with a `bookmarks` block in `conf.hjson`
+— see the commented example near the top of the default config.
+
+## Command mode (vim-like) bindings
+
+Set `modal: true` in `conf.hjson` to enable Command mode (where bare
+letters trigger verbs instead of filtering the tree). Bare-letter
+bindings below are active only in Command mode; alt-modifier bindings
+work in both modes. Without `modal: true`, pressing a bare letter
+starts a fuzzy filter rather than triggering the listed action.
+
+Bare letters (Command mode only):
+
+| Key | Action |
+|---|---|
+| `j` / `k` | move selection down / up |
+| `h` | go to parent directory |
+| `L` | focus selection (enter directory or open file) |
+| `r` | open rename / bulk rename |
+| `d` | `:trash` (recoverable — sends to platform trash) |
+| `D` | `:rm` (permanent delete — confirm required) |
+| `y` / `x` | copy / move from staging |
+| `c` / `C` | copy file name / full path to clipboard (requires `clipboard` build feature) |
+| `Y` | copy file content to clipboard (text files, ≤10 MiB; requires `clipboard` build feature) |
+| `o` | open the sort overlay |
+| `b` | open the bookmarks overlay |
+| `g` / `G` | jump to first / last entry |
+| `n` / `N` | next / previous match |
+| `q` | quit |
+| `R` | refresh |
+| `=` / <kbd>ctrl</kbd><kbd>g</kbd> | stage selection and advance to next entry |
+
+Alt-modifier (both modes):
+
+| Key | Action |
+|---|---|
+| <kbd>alt</kbd><kbd>.</kbd> | toggle hidden files (replaces former alt-h) |
+| <kbd>alt</kbd><kbd>d</kbd> | toggle last-modified dates |
+| <kbd>alt</kbd><kbd>i</kbd> | toggle gitignored files |
+| <kbd>alt</kbd><kbd>g</kbd> | toggle git file info column |
+| <kbd>alt</kbd><kbd>G</kbd> | toggle git status filtering |
+| <kbd>alt</kbd><kbd>W</kbd> | toggle whale-spotting (size sort + hidden + ignored + sizes + root_fs) |
+| <kbd>alt</kbd><kbd>s</kbd> | toggle staging area panel |
+| <kbd>alt</kbd><kbd>p</kbd> | toggle preview panel |
+| <kbd>alt</kbd><kbd>t</kbd> | toggle tree visibility |
+| <kbd>alt</kbd><kbd>b</kbd> | open bookmarks modal |
+| <kbd>alt</kbd><kbd>n</kbd> | create new file or directory |
+| <kbd>alt</kbd><kbd>shift</kbd><kbd>b</kbd> | backup selection (copies to `<name>.bak`, configurable via `backup_suffix`); always shows a `src → dst` confirm diff before copying (single-file is a 1-element bulk run) |
+| <kbd>alt</kbd><kbd>↓</kbd> / <kbd>alt</kbd><kbd>↑</kbd> | next / previous sibling at same depth |
+| <kbd>shift</kbd><kbd>↓</kbd> / <kbd>shift</kbd><kbd>↑</kbd> | next / previous directory (skipping files) |
+
+Pressing `o` opens a single-key sort overlay: `s` size, `d` date,
+`c` count, `t` type, `f` type (dirs first), `l` type (dirs last),
+`n` none.
+
+Bookmark keys are case-sensitive — `h` and `H` are independent slots,
+giving you 52 letter bindings.
+
+**Breaking changes:**
+- <kbd>alt</kbd><kbd>h</kbd> no longer toggles hidden files — use
+  <kbd>alt</kbd><kbd>.</kbd>.
+- <kbd>alt</kbd><kbd>g</kbd> now toggles **git file info** (was git
+  status). Git status filtering moved to <kbd>alt</kbd><kbd>G</kbd>.
+- Bookmarks are case-sensitive: a config `key: h` no longer matches
+  Shift+H. Add a separate `key: H` entry if you want both.
+- `=` and <kbd>ctrl</kbd><kbd>g</kbd> no longer toggle staging off —
+  they now stage-and-advance (add-only), matching `+`. Use `-` to
+  unstage.
+
+Re-bind in `conf.hjson` if you prefer the old behavior.
+
+### Icons — breaking change in this release
+
+Nerd Font icons are **on by default**. Earlier broot versions
+shipped with no icons; users upgrading from those versions will see
+unfamiliar glyph columns. If your terminal does not have a Nerd Font
+installed, set `icon_theme: none` in `conf.hjson` to restore the
+previous behaviour, or `icon_theme: nerdfont-mono` if you want the
+glyphs but not per-file color. See
+[the icons page](https://dystroy.org/broot/icons) for installation
+guidance.
+
+## Icons
+
+Nerd Font icons are on by default. Set `icon_theme: none` in
+`conf.hjson` to turn them off, `icon_theme: vscode` for the VSCode
+glyphs, or `icon_theme: nerdfont-mono` for Nerd Font glyphs without
+per-file color.
 
 ## Manage files with panels
 
@@ -155,7 +281,7 @@ If you want to display *sizes*, *dates*, and *permissions*, do `br -sdp` which g
 
 You may also toggle options with a few keystrokes while inside broot.
 For example, you could have typed this `-sdp` while in broot.
-Or hit <kbd>alt</kbd><kbd>h</kbd> and you see hidden files.
+Or hit <kbd>alt</kbd><kbd>.</kbd> and you see hidden files.
 
 ## Sort, see what takes space:
 

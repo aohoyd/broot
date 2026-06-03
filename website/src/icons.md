@@ -7,6 +7,21 @@ Here is a screenshot, with nerdfont to the left and vscode at right:
 
 ![Broot icon comparison](img/20240225-icon-comparison.png)
 
+# Default-on (since this fork)
+
+Nerd Font icons are now **on by default**. If you do not have a
+Nerd-patched font installed, set `icon_theme: none` in `conf.hjson`
+to disable icons:
+
+```hjson
+icon_theme: none
+```
+
+The previous behaviour (no icons unless explicitly turned on) is no
+longer reachable without that opt-out. The literal string `none` is
+the only opt-out value; any other unrecognised theme also produces no
+icons but is treated as a misconfiguration.
+
 # Configuration
 
 First add the appropriate lines to your broot config.

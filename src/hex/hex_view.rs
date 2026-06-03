@@ -229,29 +229,9 @@ impl HexView {
         Ok(())
     }
 
-    pub fn display_info(
-        &mut self,
-        w: &mut W,
-        _screen: Screen,
-        panel_skin: &PanelSkin,
-        area: &Area,
-    ) -> Result<(), ProgramError> {
-        let width = area.width as usize;
-        let mut s = format!("{}", self.len);
-        if s.len() > width {
-            return Ok(());
-        }
-        if s.len() + " bytes".len() < width {
-            s = format!("{s} bytes");
-        } else if s.len() + 1 < width {
-            s = format!("{s}b");
-        }
-        w.queue(cursor::MoveTo(
-            area.left + area.width - s.len() as u16,
-            area.top,
-        ))?;
-        panel_skin.styles.default.queue(w, s)?;
-        Ok(())
+    /// Returns `"{len} bytes"` for use in the preview pane's frame title.
+    pub fn info_string(&self) -> Option<String> {
+        Some(format!("{} bytes", self.len))
     }
 }
 
@@ -265,4 +245,32 @@ fn is_thumb(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `HexView` for unit tests. Real construction reads
+    /// metadata from disk; here we only exercise `info_string`.
+    fn fake_hex_view(len: usize) -> HexView {
+        HexView {
+            path: PathBuf::from("/dev/null"),
+            len,
+            scroll: 0,
+            page_height: 0,
+        }
+    }
+
+    #[test]
+    fn info_string_simple() {
+        let hv = fake_hex_view(42);
+        assert_eq!(hv.info_string(), Some("42 bytes".to_string()));
+    }
+
+    #[test]
+    fn info_string_zero() {
+        let hv = fake_hex_view(0);
+        assert_eq!(hv.info_string(), Some("0 bytes".to_string()));
+    }
 }

@@ -1,5 +1,8 @@
 use {
-    super::*,
+    super::{
+        overlay::Overlay,
+        *,
+    },
     crate::{
         browser::BrowserState,
         command::Sequence,
@@ -41,6 +44,7 @@ pub enum CmdResult {
         state: Box<dyn PanelState>,
         purpose: PanelPurpose,
         direction: HDir,
+        activate: bool,
     },
     NewState {
         state: Box<dyn PanelState>,
@@ -52,6 +56,10 @@ pub enum CmdResult {
     RefreshState {
         clear_cache: bool,
     },
+    /// Ask the App to install a floating overlay (confirmation prompt,
+    /// goto menu, …). The App takes ownership of the overlay and routes
+    /// subsequent input through it until it closes.
+    OpenOverlay(Box<Overlay>),
 }
 
 impl CmdResult {
@@ -73,6 +81,7 @@ impl CmdResult {
                         state: Box::new(os),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::NewState {
@@ -152,10 +161,12 @@ impl fmt::Debug for CmdResult {
                 state: _,
                 purpose,
                 direction,
+                activate,
             } => f
                 .debug_struct("CmdResult::NewPanel")
                 .field("purpose", purpose)
                 .field("direction", direction)
+                .field("activate", activate)
                 .finish_non_exhaustive(),
 
             CmdResult::NewState { state: _, message } => f
@@ -169,6 +180,9 @@ impl fmt::Debug for CmdResult {
                 .debug_struct("CmdResult::RefreshState")
                 .field("clear_cache", clear_cache)
                 .finish(),
+            CmdResult::OpenOverlay(_) => f
+                .debug_tuple("CmdResult::OpenOverlay")
+                .finish_non_exhaustive(),
         }
     }
 }

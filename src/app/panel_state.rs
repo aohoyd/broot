@@ -15,6 +15,7 @@ use {
         verb::*,
     },
     std::{
+        fs,
         path::{
             Path,
             PathBuf,
@@ -22,6 +23,48 @@ use {
         str::FromStr,
     },
 };
+
+/// Hard cap on the file size that `:copy_file_content` will read into
+/// memory and push to the clipboard. The clipboard is for short, mostly
+/// text payloads; loading multi-GB files would freeze the UI and most
+/// clipboard backends would refuse them anyway. 10 MiB is generous for
+/// configs, sources, and notes while still well below any sane backend
+/// limit.
+#[cfg(feature = "clipboard")]
+const MAX_COPY_FILE_CONTENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Read a regular file's UTF-8 contents for `:copy_file_content`,
+/// enforcing the size cap and rejecting directories / non-UTF-8 bytes.
+///
+/// Extracted from the `on_internal_generic` arm so the validation
+/// branches can be unit-tested without going through the live
+/// clipboard backend (whose side effects are deliberately out of
+/// scope for unit tests).
+#[cfg(feature = "clipboard")]
+fn read_file_content_for_clipboard(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("Cannot stat file: {}", e))?;
+    if !metadata.is_file() {
+        return Err("Selection is not a regular file".to_string());
+    }
+    if metadata.len() > MAX_COPY_FILE_CONTENT_BYTES {
+        return Err("File too large to copy as text".to_string());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("Cannot read file: {}", e))?;
+    String::from_utf8(bytes).map_err(|_| "Binary content, cannot copy as text".to_string())
+}
+
+/// Extract the file name from a path for `:copy_name`. Returns
+/// `Err("Selection has no file name")` when `Path::file_name()`
+/// returns `None` (e.g. the path ends in `..` or is the filesystem
+/// root). Pulled out so the no-file-name branch can be unit-tested
+/// without going through the live clipboard backend.
+#[cfg(feature = "clipboard")]
+fn file_name_for_clipboard(path: &Path) -> Result<String, String> {
+    match path.file_name() {
+        Some(name) => Ok(name.to_string_lossy().to_string()),
+        None => Err("Selection has no file name".to_string()),
+    }
+}
 
 /// a panel state, stackable to allow reverting
 ///  to a previous one
@@ -134,7 +177,7 @@ pub trait PanelState {
                 }
             }
             Internal::back => CmdResult::PopState,
-            Internal::copy_line | Internal::copy_path => {
+            Internal::copy_line | Internal::copy_path | Internal::copy_name => {
                 #[cfg(not(feature = "clipboard"))]
                 {
                     CmdResult::error("Clipboard feature not enabled at compilation")
@@ -142,10 +185,39 @@ pub trait PanelState {
                 #[cfg(feature = "clipboard")]
                 {
                     if let Some(path) = self.selected_path() {
-                        let path = path.to_string_lossy().to_string();
-                        match terminal_clipboard::set_string(path) {
+                        let to_copy = if internal_exec.internal == Internal::copy_name {
+                            match file_name_for_clipboard(path) {
+                                Ok(name) => name,
+                                Err(msg) => return Ok(CmdResult::error(msg)),
+                            }
+                        } else {
+                            path.to_string_lossy().to_string()
+                        };
+                        match terminal_clipboard::set_string(to_copy) {
                             Ok(()) => CmdResult::Keep,
                             Err(_) => CmdResult::error("Clipboard error while copying path"),
+                        }
+                    } else {
+                        CmdResult::error("Nothing to copy")
+                    }
+                }
+            }
+            Internal::copy_file_content => {
+                #[cfg(not(feature = "clipboard"))]
+                {
+                    CmdResult::error("Clipboard feature not enabled at compilation")
+                }
+                #[cfg(feature = "clipboard")]
+                {
+                    if let Some(path) = self.selected_path() {
+                        match read_file_content_for_clipboard(path) {
+                            Ok(content) => match terminal_clipboard::set_string(content) {
+                                Ok(()) => CmdResult::Keep,
+                                Err(_) => {
+                                    CmdResult::error("Clipboard error while copying content")
+                                }
+                            },
+                            Err(msg) => CmdResult::error(msg),
                         }
                     } else {
                         CmdResult::error("Nothing to copy")
@@ -162,6 +234,28 @@ pub trait PanelState {
                 panel_ref: PanelReference::Active,
                 clear_cache: false,
             },
+            Internal::close_panel_ok_if_not_last => {
+                if cc.panel.areas.nb_pos < 2 {
+                    CmdResult::Keep
+                } else {
+                    CmdResult::ClosePanel {
+                        validate_purpose: true,
+                        panel_ref: PanelReference::Active,
+                        clear_cache: true,
+                    }
+                }
+            }
+            Internal::close_panel_cancel_if_not_last => {
+                if cc.panel.areas.nb_pos < 2 {
+                    CmdResult::Keep
+                } else {
+                    CmdResult::ClosePanel {
+                        validate_purpose: false,
+                        panel_ref: PanelReference::Active,
+                        clear_cache: false,
+                    }
+                }
+            }
             Internal::move_panel_divider => {
                 let MoveDividerArgs { divider, dx } = get_arg(
                     input_invocation,
@@ -219,6 +313,7 @@ pub trait PanelState {
                                 state: Box::new(state),
                                 purpose: PanelPurpose::None,
                                 direction: HDir::Right,
+                                activate: false,
                             }
                         } else {
                             CmdResult::new_state(Box::new(state))
@@ -244,6 +339,7 @@ pub trait PanelState {
                                 state: Box::new(state),
                                 purpose: PanelPurpose::None,
                                 direction: HDir::Right,
+                                activate: false,
                             }
                         } else {
                             CmdResult::new_state(Box::new(state))
@@ -261,6 +357,7 @@ pub trait PanelState {
                         state: Box::new(HelpState::new(self.tree_options(), screen, con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::new_state(Box::new(HelpState::new(self.tree_options(), screen, con)))
@@ -481,6 +578,33 @@ pub trait PanelState {
                 bang,
                 con,
             ),
+            Internal::toggle_whale_spotting => self.with_new_options(
+                screen,
+                &|o| {
+                    let active = o.show_hidden
+                        && !o.respect_git_ignore
+                        && o.sort == Sort::Size
+                        && o.show_sizes
+                        && o.show_root_fs;
+                    if active {
+                        o.show_hidden = false;
+                        o.respect_git_ignore = true;
+                        o.sort = Sort::None;
+                        o.show_sizes = false;
+                        o.show_root_fs = false;
+                        "*whale-spotting off*"
+                    } else {
+                        o.show_hidden = true;
+                        o.respect_git_ignore = false;
+                        o.sort = Sort::Size;
+                        o.show_sizes = true;
+                        o.show_root_fs = true;
+                        "*whale-spotting on*"
+                    }
+                },
+                bang,
+                con,
+            ),
             Internal::set_max_depth => {
                 let args = input_invocation.and_then(|inv| inv.args.as_ref());
 
@@ -606,6 +730,14 @@ pub trait PanelState {
                 }
             }
             Internal::escape => CmdResult::HandleInApp(Internal::escape),
+            Internal::bookmarks => {
+                let overlay = Overlay::Goto(GotoOverlay::new(cc.app.con.bookmarks.clone()));
+                CmdResult::OpenOverlay(Box::new(overlay))
+            }
+            Internal::open_sort_overlay => {
+                let overlay = Overlay::Sort(SortOverlay::new());
+                CmdResult::OpenOverlay(Box::new(overlay))
+            }
             Internal::focus_staging_area_no_open => {
                 CmdResult::HandleInApp(Internal::focus_staging_area_no_open)
             }
@@ -635,6 +767,78 @@ pub trait PanelState {
                     CmdResult::Keep
                 }
             }
+            Internal::copy_from_staging | Internal::move_from_staging => {
+                let is_move = internal_exec.internal == Internal::move_from_staging;
+                if app_state.stage.is_empty() {
+                    CmdResult::error("Staging area is empty")
+                } else if let Some(selected) = self.selected_path() {
+                    let dest_dir = if selected.is_dir() {
+                        selected.to_path_buf()
+                    } else {
+                        selected
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| PathBuf::from("/"))
+                    };
+                    let paths: Vec<PathBuf> = app_state.stage.paths().to_vec();
+                    let total = paths.len();
+                    let mut ok_count = 0usize;
+                    let mut err_count = 0usize;
+                    for src in &paths {
+                        let file_name = match src.file_name() {
+                            Some(n) => n,
+                            None => {
+                                err_count += 1;
+                                continue;
+                            }
+                        };
+                        let dst = dest_dir.join(file_name);
+                        if src.parent() == Some(&dest_dir) {
+                            // source is already in the destination directory
+                            ok_count += 1;
+                            continue;
+                        }
+                        let result = if is_move {
+                            fs::rename(src, &dst).or_else(|_| {
+                                // cross-device move: copy then remove
+                                copy_dir_recursively(src, &dst).and_then(|_| {
+                                    if src.is_dir() {
+                                        fs::remove_dir_all(src)
+                                    } else {
+                                        fs::remove_file(src)
+                                    }
+                                })
+                            })
+                        } else if src.is_dir() {
+                            copy_dir_recursively(src, &dst)
+                        } else {
+                            fs::copy(src, &dst).map(|_| ())
+                        };
+                        match result {
+                            Ok(()) => ok_count += 1,
+                            Err(e) => {
+                                warn!("failed to {} {:?}: {}", if is_move { "move" } else { "copy" }, src, e);
+                                err_count += 1;
+                            }
+                        }
+                    }
+                    let op = if is_move { "moved" } else { "copied" };
+                    if err_count == 0 {
+                        CmdResult::RefreshState { clear_cache: true }
+                    } else if ok_count == 0 {
+                        CmdResult::DisplayError(format!(
+                            "Failed to {op_verb} all {total} file(s)",
+                            op_verb = if is_move { "move" } else { "copy" },
+                        ))
+                    } else {
+                        CmdResult::DisplayError(format!(
+                            "{op} {ok_count}/{total} file(s) ({err_count} failed)"
+                        ))
+                    }
+                } else {
+                    CmdResult::error("No selected path for destination")
+                }
+            }
             Internal::stage => self.stage(app_state, cc, con),
             Internal::unstage => self.unstage(app_state, cc, con),
             Internal::toggle_stage => self.toggle_stage(app_state, cc, con),
@@ -655,6 +859,7 @@ pub trait PanelState {
                         state: Box::new(StageState::new(app_state, self.tree_options(), con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::Keep
@@ -672,6 +877,7 @@ pub trait PanelState {
                         state: Box::new(StageState::new(app_state, self.tree_options(), con)),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 }
             }
@@ -756,6 +962,7 @@ pub trait PanelState {
                     state: Box::new(StageState::new(app_state, self.tree_options(), con)),
                     purpose: PanelPurpose::None,
                     direction: HDir::Right,
+                    activate: false,
                 };
             }
         } else {
@@ -817,6 +1024,9 @@ pub trait PanelState {
         if verb.needs_another_panel && app_state.other_panel_path.is_none() {
             return Ok(CmdResult::error("This verb needs another panel"));
         }
+        if verb.needs_staging && app_state.stage.is_empty() {
+            return Ok(CmdResult::error("This verb needs at least one staged file"));
+        }
         let res = match &verb.execution {
             VerbExecution::Internal(internal_exec) => self.on_internal(
                 w,
@@ -862,8 +1072,12 @@ pub trait PanelState {
     ) -> Result<CmdResult, ProgramError> {
         let sel_info = self.sel_info(app_state);
         if let Some(invocation) = &invocation {
-            if let Some(error) = verb.check_args(sel_info, invocation, &app_state.other_panel_path)
-            {
+            if let Some(error) = verb.check_args(
+                sel_info,
+                invocation,
+                &app_state.other_panel_path,
+                app_state.stage.is_empty(),
+            ) {
                 debug!("verb.check_args prevented execution: {:?}", &error);
                 return Ok(CmdResult::error(error));
             }
@@ -964,6 +1178,7 @@ pub trait PanelState {
                     &invocation.name,
                     sel_info,
                     Some(self.get_type()),
+                    app_state.stage.is_empty(),
                 ) {
                     PrefixSearchResult::Match(_, verb) => self.execute_verb(
                         w,
@@ -1005,16 +1220,19 @@ pub trait PanelState {
                 CmdResult::Keep
             }
         } else if let Some(path) = self.selected_path() {
+            let line = self.selection().map_or(0, |s| s.line);
             CmdResult::NewPanel {
                 state: Box::new(PreviewState::new(
                     path.to_path_buf(),
                     InputPattern::none(),
+                    line,
                     preferred_mode,
                     self.tree_options(),
                     cc.app.con,
                 )),
                 purpose: PanelPurpose::Preview,
                 direction: HDir::Right,
+                activate: false,
             }
         } else {
             CmdResult::error("no selected file")
@@ -1024,6 +1242,52 @@ pub trait PanelState {
     /// must return None if the state doesn't display a file tree
     fn tree_root(&self) -> Option<&Path> {
         None
+    }
+
+    /// Title to embed in the top edge of the panel frame.
+    ///
+    /// Default implementation: if `tree_root()` returns a path, use a
+    /// home-substituted, length-bounded label; otherwise fall back to a
+    /// short label derived from `get_type()` so the frame is never
+    /// headerless. `max_w` is the maximum render width in columns.
+    fn frame_title(
+        &self,
+        max_w: u16,
+    ) -> String {
+        if let Some(root) = self.tree_root() {
+            return crate::display::frame::path_label(root, max_w);
+        }
+        default_frame_title_for_type(self.get_type()).to_string()
+    }
+
+    /// Optional auxiliary info painted at the right end of the active
+    /// panel's status row (git summary, total size, mount-space widget).
+    ///
+    /// Returns `None` to leave the status row as message-only. Default
+    /// implementation returns `None`; `BrowserState` overrides to surface
+    /// the data that used to live on the (now-hidden) tree root row.
+    ///
+    /// Method named `status_aux` (no `get_` prefix) to match the sibling
+    /// `frame_title` / `tree_root` style.
+    fn status_aux(&self) -> Option<crate::display::StatusAux> {
+        None
+    }
+
+    /// True when the panel's frame title should render with the
+    /// body's selection background, signalling that the (hidden)
+    /// root row is the current selection. Default `false`; only
+    /// `BrowserState` overrides this.
+    ///
+    /// The returned bool is forwarded directly to `draw_frame_title`'s
+    /// `selected` arg. When `true`, the title is painted with the
+    /// `frame_title` compound style but with its background overlaid
+    /// from `selected_line.bg`, producing the same selection highlight
+    /// the body would have drawn on the (now hidden) root row.
+    ///
+    /// Method named `title_selected` (no `is_` prefix) to match the
+    /// sibling `frame_title` / `status_aux` / `tree_root` style.
+    fn title_selected(&self) -> bool {
+        false
     }
 
     fn watchable_paths(&self) -> Vec<PathBuf> {
@@ -1106,6 +1370,7 @@ pub trait PanelState {
     fn set_selected_path(
         &mut self,
         _path: PathBuf,
+        _line: LineNumber,
         _con: &AppContext,
     ) {
         // this function is useful for preview states
@@ -1148,6 +1413,7 @@ pub trait PanelState {
                         &invocation.name,
                         sel_info,
                         Some(self.get_type()),
+                        app_state.stage.is_empty(),
                     ) {
                         PrefixSearchResult::NoMatch => {
                             Status::new("No matching verb (*?* for the list of verbs)", true)
@@ -1193,7 +1459,12 @@ pub trait PanelState {
             }
             // right now there's no check for sequences but they're inherently dangerous
         }
-        if let Some(err) = verb.check_args(sel_info, invocation, &app_state.other_panel_path) {
+        if let Some(err) = verb.check_args(
+            sel_info,
+            invocation,
+            &app_state.other_panel_path,
+            app_state.stage.is_empty(),
+        ) {
             Status::new(err, true)
         } else {
             Status::new(
@@ -1201,6 +1472,19 @@ pub trait PanelState {
                 false,
             )
         }
+    }
+}
+
+/// Short fallback title for a panel state that does not have a tree
+/// root. Used by `PanelState::frame_title` when `tree_root()` is `None`.
+pub(crate) fn default_frame_title_for_type(t: PanelStateType) -> &'static str {
+    match t {
+        PanelStateType::Help => "Help",
+        PanelStateType::Preview => "Preview",
+        PanelStateType::Stage => "Stage",
+        PanelStateType::Trash => "Trash",
+        PanelStateType::Fs => "Filesystems",
+        PanelStateType::Tree => "Tree",
     }
 }
 
@@ -1214,4 +1498,178 @@ pub fn get_arg<T: Copy + FromStr>(
         .or(internal_exec.arg.as_ref())
         .and_then(|s| s.parse::<T>().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod frame_title_tests {
+    use super::*;
+
+    // `default_frame_title_specific_values` below subsumes the
+    // non-empty check (each `assert_eq!` against a literal proves the
+    // value is non-empty), so a separate `is_non_empty` test would be
+    // dead.
+
+    #[test]
+    fn default_frame_title_specific_values() {
+        assert_eq!(default_frame_title_for_type(PanelStateType::Help), "Help");
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Preview),
+            "Preview"
+        );
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Stage),
+            "Stage"
+        );
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Trash),
+            "Trash"
+        );
+        assert_eq!(
+            default_frame_title_for_type(PanelStateType::Fs),
+            "Filesystems"
+        );
+        assert_eq!(default_frame_title_for_type(PanelStateType::Tree), "Tree");
+    }
+}
+
+#[cfg(all(test, feature = "clipboard"))]
+mod copy_file_content_tests {
+    use super::*;
+
+    /// `:copy_file_content` refuses directory selections — the
+    /// clipboard is for byte content, not directory listings.
+    #[test]
+    fn directory_selection_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = read_file_content_for_clipboard(tmp.path()).expect_err("dir must error");
+        assert_eq!(err, "Selection is not a regular file");
+    }
+
+    /// Files larger than `MAX_COPY_FILE_CONTENT_BYTES` are rejected
+    /// without being read. We test with the cap + 1 byte to pin the
+    /// boundary; a sparse file via `set_len` keeps the test fast.
+    #[test]
+    fn oversized_file_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("huge.txt");
+        let f = fs::File::create(&path).expect("create file");
+        f.set_len(MAX_COPY_FILE_CONTENT_BYTES + 1).expect("set_len");
+        drop(f);
+        let err = read_file_content_for_clipboard(&path).expect_err("oversize must error");
+        assert_eq!(err, "File too large to copy as text");
+    }
+
+    /// Non-UTF-8 bytes are rejected — the clipboard contract is text,
+    /// not arbitrary binary.
+    #[test]
+    fn non_utf8_file_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("binary.bin");
+        fs::write(&path, [0xFF, 0xFE, 0xFD]).expect("write");
+        let err = read_file_content_for_clipboard(&path).expect_err("non-utf8 must error");
+        assert_eq!(err, "Binary content, cannot copy as text");
+    }
+
+    /// Happy path: a small UTF-8 file's contents come back verbatim.
+    #[test]
+    fn small_utf8_file_returns_contents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hello.txt");
+        let contents = "hello, broot\n";
+        fs::write(&path, contents).expect("write");
+        let got = read_file_content_for_clipboard(&path).expect("happy path");
+        assert_eq!(got, contents);
+    }
+
+    /// A non-existent path fails at the metadata stage. The error
+    /// surfaces as "Cannot stat file: ..." (distinct from the post-
+    /// metadata "Cannot read file" path) so users can tell whether
+    /// the failure was the stat or the read.
+    #[test]
+    fn missing_path_surfaces_stat_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.txt");
+        let err = read_file_content_for_clipboard(&path)
+            .expect_err("missing path must error");
+        assert!(
+            err.starts_with("Cannot stat file:"),
+            "expected `Cannot stat file:` prefix, got {err:?}",
+        );
+    }
+
+    /// A zero-byte UTF-8 file is valid: the empty string is the
+    /// content. Pins the boundary; an off-by-one in the cap check
+    /// (e.g. `>=` instead of `>`) would surface as a regression here.
+    #[test]
+    fn zero_byte_file_returns_empty_string() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("empty.txt");
+        fs::write(&path, []).expect("write");
+        let got = read_file_content_for_clipboard(&path).expect("zero bytes is valid");
+        assert_eq!(got, "");
+    }
+
+    /// `:copy_name` extracts the path's final component. A regular
+    /// file gets its base name back.
+    #[test]
+    fn copy_name_returns_file_name() {
+        let path = PathBuf::from("/etc/hosts");
+        let got = file_name_for_clipboard(&path).expect("ok");
+        assert_eq!(got, "hosts");
+    }
+
+    /// Paths that don't have a final component (e.g. ending in `..`
+    /// after path normalization, or the filesystem root `/`) surface
+    /// an explicit "Selection has no file name" error rather than
+    /// returning an empty string. We exercise the explicit `..` form
+    /// since it doesn't depend on the host filesystem layout.
+    #[test]
+    fn copy_name_on_dotdot_path_errors() {
+        let path = PathBuf::from("..");
+        let err = file_name_for_clipboard(&path).expect_err("`..` has no file name");
+        assert_eq!(err, "Selection has no file name");
+    }
+
+    /// The filesystem root has no file_name either.
+    #[test]
+    fn copy_name_on_root_path_errors() {
+        let path = PathBuf::from("/");
+        let err = file_name_for_clipboard(&path).expect_err("/ has no file name");
+        assert_eq!(err, "Selection has no file name");
+    }
+
+    /// A file at exactly `MAX_COPY_FILE_CONTENT_BYTES` (10 MiB) is
+    /// accepted; the cap check is `metadata.len() > MAX` so equality
+    /// passes through. We don't assert on the contents (a 10 MiB
+    /// sparse zero-byte file is not valid UTF-8 unless every byte
+    /// is a NUL — which is valid UTF-8 — so the read succeeds).
+    /// What this test pins is the size-check boundary: 10 MiB + 1
+    /// is already covered by `oversized_file_is_rejected`; this
+    /// covers the other side of the inequality.
+    #[test]
+    fn file_at_exact_cap_is_accepted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("at-cap.txt");
+        let f = fs::File::create(&path).expect("create file");
+        f.set_len(MAX_COPY_FILE_CONTENT_BYTES).expect("set_len");
+        drop(f);
+        let got = read_file_content_for_clipboard(&path)
+            .expect("file at exactly the cap must be accepted");
+        assert_eq!(got.len() as u64, MAX_COPY_FILE_CONTENT_BYTES);
+    }
+}
+
+pub(crate) fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursively(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }

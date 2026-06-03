@@ -162,14 +162,19 @@ impl Panel {
         screen: Screen,
     ) -> Result<(), ProgramError> {
         let task = self.state().get_pending_task();
+        // The active panel surfaces aux info (git summary, total size,
+        // mount space) at the right end of its status row. Non-tree
+        // panels return `None`, leaving the row as message-only.
+        let aux = self.state().status_aux();
         status_line::write(
             w,
             watching,
             task,
             &self.status,
-            &self.areas.status,
+            aux.as_ref(),
             panel_skin,
             screen,
+            &self.areas.status,
         )
     }
 

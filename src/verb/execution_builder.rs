@@ -3,17 +3,12 @@ use {
     crate::{
         app::*,
         command::*,
-        path::{
-            self,
-            PathAnchor,
-        },
+        path::{self, PathAnchor},
+        stage::Stage,
     },
     regex::Captures,
     rustc_hash::FxHashMap,
-    std::path::{
-        Path,
-        PathBuf,
-    },
+    std::path::{Path, PathBuf},
 };
 
 /// a temporary structure gathering selection and invocation
@@ -28,6 +23,9 @@ pub struct ExecutionBuilder<'b> {
 
     /// the selection in the other panel, when there are exactly two
     other_file: Option<&'b PathBuf>,
+
+    /// the staging area
+    stage: &'b Stage,
 
     /// parsed arguments
     invocation_values: Option<FxHashMap<String, String>>,
@@ -58,6 +56,7 @@ impl<'b> ExecutionBuilder<'b> {
             sel_info,
             root: &app_state.root,
             other_file: app_state.other_panel_path.as_ref(),
+            stage: &app_state.stage,
             invocation_values: None,
             keep_groups: false,
             target: Target::Tokens,
@@ -77,6 +76,7 @@ impl<'b> ExecutionBuilder<'b> {
             sel_info,
             root: &app_state.root,
             other_file: app_state.other_panel_path.as_ref(),
+            stage: &app_state.stage,
             invocation_values,
             keep_groups: false,
             target: Target::Tokens,
@@ -211,10 +211,18 @@ impl<'b> ExecutionBuilder<'b> {
                     .unwrap_or(sel.path);
                 Some(self.path_to_string(path))
             }
+            "staging" => {
+                let paths: Vec<String> = self
+                    .stage
+                    .paths()
+                    .iter()
+                    .map(|p| self.path_to_string(p))
+                    .collect();
+                Some(paths.join(" "))
+            }
             "file-root-relative" => {
                 // file path relative to the tree root
-                sel?
-                    .path
+                sel?.path
                     .strip_prefix(self.root)
                     .ok()
                     .map(|p| self.path_to_string(p))

@@ -4,8 +4,8 @@ use {
         path::PathAnchor,
     },
     lazy_regex::*,
-    std::str::FromStr,
     std::fmt,
+    std::str::FromStr,
 };
 
 /// A `{name:flags}` group in a verb definition string, where `name` is the argument name and

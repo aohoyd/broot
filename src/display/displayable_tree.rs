@@ -3,7 +3,6 @@ use {
         BRANCH_FILLING,
         Col,
         CropWriter,
-        GitStatusDisplay,
         MatchedString,
         SPACE_FILLING,
         num_format::format_count,
@@ -13,12 +12,12 @@ use {
         content_search::ContentMatch,
         errors::ProgramError,
         file_sum::FileSum,
+        icon::IconPlugin,
         pattern::PatternObject,
         skin::{
             ExtColorMap,
             StyleMap,
         },
-        task_sync::ComputationResult,
         tree::{
             Tree,
             TreeLine,
@@ -34,6 +33,7 @@ use {
     crokey::crossterm::{
         QueueableCommand,
         cursor,
+        style::Attribute,
     },
     file_size,
     git2::Status,
@@ -41,10 +41,6 @@ use {
     termimad::{
         CompoundStyle,
         ProgressBar,
-    },
-    unicode_width::{
-        UnicodeWidthChar,
-        UnicodeWidthStr,
     },
 };
 
@@ -63,6 +59,36 @@ pub struct DisplayableTree<'a, 's, 't> {
     pub area: termimad::Area,
     pub in_app: bool, // if true we show the selection and scrollbar
     pub ext_colors: &'s ExtColorMap,
+    pub icon_plugin: Option<&'s (dyn IconPlugin + Send + Sync)>,
+}
+
+/// Derive the icon-cell style from the row's `label_style`.
+///
+/// When `has_ext_override` is true, the user's `ext_colors` config has
+/// matched and wins on both the icon and the filename — return the
+/// label style unchanged (no plugin color, no Bold), so icon and name
+/// look identical. Otherwise, ask the icon plugin for a per-type color
+/// and add Bold. The bg is inherited from `label_style` so selection
+/// painting works.
+fn compute_icon_style(
+    label_style: &CompoundStyle,
+    has_ext_override: bool,
+    icon_plugin: Option<&dyn IconPlugin>,
+    line_type: &TreeLineType,
+    name: &str,
+    ext: Option<&str>,
+) -> CompoundStyle {
+    let mut s = label_style.clone();
+    if has_ext_override {
+        return s;
+    }
+    if let Some(plugin) = icon_plugin {
+        if let Some(c) = plugin.get_icon_color(line_type, name, ext) {
+            s.set_fg(c);
+        }
+    }
+    s.add_attr(Attribute::Bold);
+    s
 }
 
 impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
@@ -79,6 +105,7 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             tree,
             skin,
             ext_colors,
+            icon_plugin: None,
             area: termimad::Area {
                 left: 0,
                 top: 0,
@@ -331,8 +358,19 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
     ) -> Result<usize, ProgramError> {
         cond_bg!(char_match_style, self, selected, self.skin.char_match);
         if let Some(icon) = line.icon {
-            cw.queue_char(style, icon)?;
-            cw.queue_char(style, ' ')?;
+            let ext = line.extension();
+            let has_ext_override = ext
+                .map(|e| self.ext_colors.get(e).is_some())
+                .unwrap_or(false);
+            let icon_style = compute_icon_style(
+                style,
+                has_ext_override,
+                self.icon_plugin.map(|p| p as &dyn IconPlugin),
+                &line.line_type,
+                &line.name,
+                ext,
+            );
+            cw.queue_char(&icon_style, icon)?;
             cw.queue_char(style, ' ')?;
         }
         if pattern_object.subpath {
@@ -417,57 +455,6 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
         Ok(())
     }
 
-    pub fn write_root_line<W: Write>(
-        &self,
-        cw: &mut CropWriter<W>,
-        selected: bool,
-    ) -> Result<(), ProgramError> {
-        cond_bg!(style, self, selected, self.skin.directory);
-        let line = &self.tree.lines[0];
-        if self.tree.options.show_sizes {
-            if let Some(s) = line.sum {
-                cw.queue_g_string(style, format!("{:>4} ", file_size::fit_4(s.to_size())))?;
-            }
-        }
-        let title = line.path.to_string_lossy();
-        let title_len = UnicodeWidthStr::width(title.as_ref());
-        if title_len > cw.allowed {
-            cw.queue_char(style, '…')?;
-            // we take the last chars making up to allowed - 1 columns
-            // we'll assume there's no backspace
-            let mut width = 0;
-            let mut bytes = 0;
-            for c in title.chars().rev() {
-                let char_width = c.width().unwrap_or(0);
-                if width + char_width > cw.allowed - 1 {
-                    break;
-                }
-                width += char_width;
-                bytes += c.len_utf8();
-            }
-            let right_cropped_title = &title[title.len() - bytes..];
-            cw.queue_str(style, right_cropped_title)?;
-        } else {
-            cw.queue_str(style, &title)?;
-        }
-
-        if self.in_app && !cw.is_full() {
-            if let ComputationResult::Done(git_status) = &self.tree.git_status {
-                let git_status_display = GitStatusDisplay::from(git_status, self.skin, cw.allowed);
-                git_status_display.write(cw, selected)?;
-            }
-            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-            if self.tree.options.show_root_fs {
-                if let Some(mount) = line.mount() {
-                    let fs_space_display =
-                        crate::filesystems::MountSpaceDisplay::from(&mount, self.skin, cw.allowed);
-                    fs_space_display.write(cw, selected)?;
-                }
-            }
-            self.extend_line_bg(cw, selected)?;
-        }
-        Ok(())
-    }
 
     /// if in app, extend the background till the end of screen row
     pub fn extend_line_bg<W: Write>(
@@ -493,22 +480,22 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
         let tree = self.tree;
         let total_size = tree.total_sum();
         let scrollbar = if self.in_app {
+            // The root row (`tree.lines[0]`) is no longer painted into the
+            // body — it's surfaced via the frame title, and the aux info
+            // it used to carry lives at the right end of the status row.
+            // The body renders `tree.lines[1..]` starting at `area.top`,
+            // so the scrollbar spans the full area height and the
+            // content row count is `tree.lines.len() - 1`.
             termimad::compute_scrollbar(
                 tree.scroll,
-                tree.lines.len() - 1, // the root line isn't scrolled
-                self.area.height - 1, // the scrollbar doesn't cover the first line
-                self.area.top + 1,
+                tree.lines.len() - 1, // root excluded from scroll
+                self.area.height,
+                self.area.top,
             )
         } else {
             None
         };
-        if self.in_app {
-            f.queue(cursor::MoveTo(self.area.left, self.area.top))?;
-        }
-        let mut cw = CropWriter::new(f, self.area.width as usize);
         let pattern_object = tree.options.pattern.pattern.object();
-        self.write_root_line(&mut cw, self.in_app && tree.selection == 0)?;
-        self.skin.queue_reset(f)?;
 
         let visible_cols: Vec<Col> = tree
             .options
@@ -542,16 +529,16 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             0 // we don't care
         };
 
-        for y in 1..self.area.height {
+        for y in 0..self.area.height {
             if self.in_app {
                 f.queue(cursor::MoveTo(self.area.left, y + self.area.top))?;
             } else {
                 write!(f, "\r\n")?;
             }
-            let mut line_index = y as usize;
-            if line_index > 0 {
-                line_index += tree.scroll;
-            }
+            // Body rows render `tree.lines[1..]` starting at body row 0:
+            // body row 0 -> lines[1 + scroll], body row 1 -> lines[2 + scroll], ...
+            // (root line is now painted in the frame title, not the body)
+            let line_index = (y as usize) + 1 + tree.scroll;
             let mut selected = false;
             let mut cw = CropWriter::new(f, self.area.width as usize);
             let cw = &mut cw;
@@ -664,8 +651,18 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             self.skin.queue_reset(f)?;
             if self.in_app {
                 if let Some((sctop, scbottom)) = scrollbar {
-                    f.queue(cursor::MoveTo(self.area.left + self.area.width - 1, y))?;
-                    let style = if sctop <= y && y <= scbottom {
+                    // `y` is the body-row index (0-based); the scrollbar is
+                    // painted at the absolute row `y + self.area.top`. The
+                    // `sctop`/`scbottom` returned by `compute_scrollbar` are
+                    // absolute rows too (the helper was called with
+                    // `top = self.area.top`), so the thumb predicate must
+                    // compare against the absolute row.
+                    let abs_y = y + self.area.top;
+                    f.queue(cursor::MoveTo(
+                        self.area.left + self.area.width - 1,
+                        abs_y,
+                    ))?;
+                    let style = if sctop <= abs_y && abs_y <= scbottom {
                         &self.skin.scrollbar_thumb
                     } else {
                         &self.skin.scrollbar_track
@@ -678,5 +675,143 @@ impl<'a, 's, 't> DisplayableTree<'a, 's, 't> {
             write!(f, "\r\n")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crokey::crossterm::style::Color;
+
+    struct ColoredStub;
+    impl IconPlugin for ColoredStub {
+        fn get_icon(
+            &self,
+            _: &TreeLineType,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> char {
+            '?'
+        }
+        fn get_icon_color(
+            &self,
+            _: &TreeLineType,
+            _: &str,
+            _: Option<&str>,
+        ) -> Option<Color> {
+            Some(Color::Rgb {
+                r: 255,
+                g: 143,
+                b: 64,
+            })
+        }
+    }
+
+    struct UncoloredStub;
+    impl IconPlugin for UncoloredStub {
+        fn get_icon(
+            &self,
+            _: &TreeLineType,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> char {
+            '?'
+        }
+    }
+
+    fn label_style_with(fg: Option<Color>, bg: Option<Color>) -> CompoundStyle {
+        let mut s = CompoundStyle::default();
+        if let Some(c) = fg {
+            s.set_fg(c);
+        }
+        if let Some(c) = bg {
+            s.set_bg(c);
+        }
+        s
+    }
+
+    #[test]
+    fn icon_style_inherits_bg_from_label_style() {
+        let bg = Color::Rgb { r: 30, g: 30, b: 60 };
+        let label = label_style_with(Some(Color::White), Some(bg));
+        let plugin: Box<dyn IconPlugin> = Box::new(ColoredStub);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(icon.get_bg(), Some(bg));
+    }
+
+    #[test]
+    fn icon_style_applies_plugin_color_when_no_ext_override() {
+        let label = label_style_with(Some(Color::White), None);
+        let plugin: Box<dyn IconPlugin> = Box::new(ColoredStub);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(
+            icon.get_fg(),
+            Some(Color::Rgb { r: 255, g: 143, b: 64 })
+        );
+        assert!(icon.has_attr(Attribute::Bold));
+    }
+
+    #[test]
+    fn icon_style_skips_plugin_color_when_ext_override_present() {
+        let label_fg = Color::Rgb { r: 100, g: 200, b: 50 };
+        let label = label_style_with(Some(label_fg), None);
+        let plugin: Box<dyn IconPlugin> = Box::new(ColoredStub);
+        let icon = compute_icon_style(
+            &label,
+            true,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(icon.get_fg(), Some(label_fg));
+        assert!(!icon.has_attr(Attribute::Bold));
+    }
+
+    #[test]
+    fn icon_style_skips_plugin_color_when_plugin_returns_none() {
+        let label_fg = Color::White;
+        let label = label_style_with(Some(label_fg), None);
+        let plugin: Box<dyn IconPlugin> = Box::new(UncoloredStub);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            Some(plugin.as_ref()),
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert_eq!(icon.get_fg(), Some(label_fg));
+        assert!(icon.has_attr(Attribute::Bold));
+    }
+
+    #[test]
+    fn icon_style_without_plugin_still_adds_bold() {
+        let label = label_style_with(Some(Color::White), None);
+        let icon = compute_icon_style(
+            &label,
+            false,
+            None,
+            &TreeLineType::File,
+            "main.rs",
+            Some("rs"),
+        );
+        assert!(icon.has_attr(Attribute::Bold));
     }
 }

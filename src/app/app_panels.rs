@@ -21,7 +21,10 @@ use {
             PathBuf,
         },
     },
-    termimad::TimedEvent,
+    termimad::{
+        Area,
+        TimedEvent,
+    },
 };
 
 /// Stores panels of the application and their inputs.
@@ -338,8 +341,9 @@ impl AppPanelsAndInputs {
         if len == 2 {
             let non_removed_idx = if panel_idx == 0 { 1 } else { 0 };
             let non_removed_panel = &self.panels.panels[non_removed_idx];
-            if non_removed_panel.state().get_type() == PanelStateType::Preview
-                || non_removed_panel.state().get_type() == PanelStateType::Stage
+            let remaining_type = non_removed_panel.state().get_type();
+            if remaining_type == PanelStateType::Preview
+                || remaining_type == PanelStateType::Stage
             {
                 return false; // we don't want to stay with just the preview or stage
             }
@@ -411,7 +415,9 @@ impl AppPanelsAndInputs {
     ) -> usize {
         let len = self.len();
         for (idx, panel) in self.panels.panels.iter().enumerate() {
-            let area = &panel.areas.state;
+            // Use the outer rect so a click on the frame border still
+            // selects the panel (the inner `state` is shrunk by the frame).
+            let area = &panel.areas.state_outer;
             if area.left <= x && x < area.left + area.width {
                 return idx;
             }
@@ -493,6 +499,7 @@ impl AppPanelsAndInputs {
         dam: &mut Dam,
         app_state: &mut AppState,
         con: &AppContext,
+        overlay: Option<&Overlay>,
     ) -> Result<(), ProgramError> {
         while self.has_pending_task() && !dam.has_event() {
             let error = self.do_pending_task(app_state, con, dam).err();
@@ -503,7 +510,7 @@ impl AppPanelsAndInputs {
                 let panel_skin = &skin.focused;
                 self.refresh_input_status(app_state, panel_skin, con);
             }
-            self.display_panels(w, skin, app_state, con)?;
+            self.display_panels(w, skin, app_state, con, overlay)?;
             if error.is_some() {
                 return Ok(()); // breaking pending tasks chain on first error/interruption
             }
@@ -597,10 +604,11 @@ impl AppPanelsAndInputs {
         if let Some(path) = self.state().selected_path() {
             let old_path = self.panels.panels[preview_idx].state().selected_path();
             if refresh || Some(path) != old_path {
+                let line = self.state().selection().map_or(0, |s| s.line);
                 let path = path.to_path_buf();
                 self.panels.panels[preview_idx]
                     .mut_state()
-                    .set_selected_path(path, con);
+                    .set_selected_path(path, line, con);
             }
         }
     }
@@ -664,12 +672,17 @@ impl AppPanelsAndInputs {
 
     /// redraw the whole screen. All drawing
     /// are supposed to happen here, and only here.
+    ///
+    /// If `overlay` is `Some`, it is painted over the panels right
+    /// before the buffer is flushed, so confirmation modals and the
+    /// goto modal sit on top of the regular UI.
     pub fn display_panels(
         &mut self,
         w: &mut W,
         skin: &AppSkin,
         app_state: &AppState,
         con: &AppContext,
+        overlay: Option<&Overlay>,
     ) -> Result<(), ProgramError> {
         self.drawing_count += 1;
         let screen = self.screen();
@@ -683,6 +696,29 @@ impl AppPanelsAndInputs {
             } else {
                 &skin.unfocused
             };
+            // Frame must be drawn BEFORE panel content so subsequent
+            // content writes inside `panel.areas.state` (the shrunk
+            // interior) don't overdraw the border. The title is drawn
+            // last on the top edge so it overlays the freshly drawn
+            // horizontal `─` characters.
+            let outer = panel.areas.state_outer.clone();
+            if outer.width >= 3 && outer.height >= 3 {
+                let frame_style = frame::FrameStyle::rounded();
+                frame::draw_frame(w, outer.clone(), &panel_skin.styles, &frame_style)?;
+                if outer.width >= 6 {
+                    let title = panel
+                        .state()
+                        .frame_title(outer.width.saturating_sub(4));
+                    let title_selected = panel.state().title_selected();
+                    frame::draw_frame_title(
+                        w,
+                        outer.clone(),
+                        &panel_skin.styles,
+                        &title,
+                        title_selected,
+                    )?;
+                }
+            }
             let disc = DisplayContext {
                 count: self.drawing_count,
                 active,
@@ -731,6 +767,16 @@ impl AppPanelsAndInputs {
                 error!("failed to lock kitty manager to erase images: {e}");
             }
         }
+
+        // Overlay paint pass — runs last so the modal sits on top of
+        // panels, status, and input. Uses the focused style map so the
+        // modal renders with the same accent colours regardless of
+        // which panel is currently active behind it.
+        if let Some(ov) = overlay {
+            let screen_area = Area::new(0, 0, screen.width, screen.height);
+            ov.render(w, screen_area, &skin.focused.styles)?;
+        }
+
         w.flush()?;
         Ok(())
     }

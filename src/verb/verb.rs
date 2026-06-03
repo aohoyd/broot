@@ -66,9 +66,19 @@ pub struct Verb {
     /// (which is the case when the execution pattern has {other-panel-file})
     pub needs_another_panel: bool,
 
+    /// whether we need the staging area to be non-empty for execution
+    /// (which is the case when the execution pattern has {staging})
+    pub needs_staging: bool,
+
     /// if true (default) verbs are directly executed when
     /// triggered with a keyboard shortcut
     pub auto_exec: bool,
+
+    /// whether the verb is destructive and must prompt the user with
+    /// a confirmation overlay before executing. Defaults to `false`.
+    /// Set on built-in destructive verbs (`rm`) and overridable per
+    /// verb via the `confirm` field in `VerbConf`.
+    pub requires_confirm: bool,
 
     /// whether to show the verb in help screen
     /// (if we show all input related actions, the doc is unusable)
@@ -103,15 +113,17 @@ impl Verb {
             check_verb_name(&name)?;
             names.push(name);
         }
-        let (needs_selection, needs_another_panel) = match &execution {
-            VerbExecution::Internal(ie) => (ie.needs_selection(), false),
+        let (needs_selection, needs_another_panel, needs_staging) = match &execution {
+            VerbExecution::Internal(ie) => (ie.needs_selection(), false, false),
             VerbExecution::External(ee) => (
                 ee.exec_pattern.has_selection_group(),
                 ee.exec_pattern.has_other_panel_group(),
+                ee.exec_pattern.has_staging_group(),
             ),
             VerbExecution::Sequence(se) => (
                 se.sequence.has_selection_group(),
                 se.sequence.has_other_panel_group(),
+                se.sequence.has_staging_group(),
             ),
         };
         Ok(Self {
@@ -125,7 +137,9 @@ impl Verb {
             file_extensions: Vec::new(),
             needs_selection,
             needs_another_panel,
+            needs_staging,
             auto_exec: true,
+            requires_confirm: false,
             show_in_doc: true,
             panels: Vec::new(),
             impacted_panel: PanelReference::default(),
@@ -191,6 +205,16 @@ impl Verb {
         self
     }
 
+    /// Mark the verb as destructive — the App will prompt the user
+    /// with a confirmation overlay before executing it.
+    pub fn with_confirm(
+        &mut self,
+        b: bool,
+    ) -> &mut Self {
+        self.requires_confirm = b;
+        self
+    }
+
     pub fn has_name(
         &self,
         searched_name: &str,
@@ -206,10 +230,13 @@ impl Verb {
         sel_info: SelInfo<'_>,
         invocation: &VerbInvocation,
         other_path: &Option<PathBuf>,
+        stage_is_empty: bool,
     ) -> Option<String> {
         match sel_info {
-            SelInfo::None => self.check_sel_args(None, invocation, other_path),
-            SelInfo::One(sel) => self.check_sel_args(Some(sel), invocation, other_path),
+            SelInfo::None => self.check_sel_args(None, invocation, other_path, stage_is_empty),
+            SelInfo::One(sel) => {
+                self.check_sel_args(Some(sel), invocation, other_path, stage_is_empty)
+            }
             SelInfo::More(stage) => stage
                 .paths()
                 .iter()
@@ -220,7 +247,7 @@ impl Verb {
                         stype: SelectionType::from(path),
                         is_exe: false,
                     };
-                    self.check_sel_args(Some(sel), invocation, other_path)
+                    self.check_sel_args(Some(sel), invocation, other_path, stage_is_empty)
                 })
                 .next(),
         }
@@ -231,11 +258,14 @@ impl Verb {
         sel: Option<Selection<'_>>,
         invocation: &VerbInvocation,
         other_path: &Option<PathBuf>,
+        stage_is_empty: bool,
     ) -> Option<String> {
         if self.needs_selection && sel.is_none() {
             Some("This verb needs a selection".to_string())
         } else if self.needs_another_panel && other_path.is_none() {
             Some("This verb needs exactly two panels".to_string())
+        } else if self.needs_staging && stage_is_empty {
+            Some("This verb needs at least one staged file".to_string())
         } else if let Some(ref parser) = self.invocation_parser {
             parser.check_args(invocation, other_path)
         } else if invocation.args.is_some() {
@@ -354,5 +384,53 @@ pub fn check_verb_name(name: &str) -> Result<(), ConfError> {
         Err(ConfError::InvalidVerbName {
             name: name.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::verb::{
+            ExecPattern,
+            ExternalExecution,
+            ExternalExecutionMode,
+        },
+    };
+
+    fn make_external_verb() -> Verb {
+        let exec = VerbExecution::External(ExternalExecution::new(
+            ExecPattern::from_string("rm -rf {file}"),
+            ExternalExecutionMode::StayInBroot,
+        ));
+        Verb::new(
+            0,
+            Some("rm"),
+            exec,
+            VerbDescription::from_code("rm -rf {file}".to_string()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn requires_confirm_defaults_to_false() {
+        let v = make_external_verb();
+        assert!(!v.requires_confirm);
+    }
+
+    #[test]
+    fn with_confirm_true_sets_field() {
+        let mut v = make_external_verb();
+        v.with_confirm(true);
+        assert!(v.requires_confirm);
+    }
+
+    #[test]
+    fn with_confirm_false_clears_field() {
+        let mut v = make_external_verb();
+        v.with_confirm(true);
+        assert!(v.requires_confirm);
+        v.with_confirm(false);
+        assert!(!v.requires_confirm);
     }
 }

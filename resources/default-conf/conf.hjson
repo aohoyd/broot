@@ -90,11 +90,47 @@ show_selection_mark: true
 
 ###############################################################
 # Icons
-# If you want to display icons in broot, uncomment this line
+# Icons are enabled by default with the `nerdfont` theme — install
+# a Nerd Font in your terminal to render them
 # (see https://dystroy.org/broot/icons for installation and
-# troubleshooting)
+# troubleshooting).
+# Other supported values: `vscode` (uses the bundled vscode font),
+# `nerdfont-mono` (same Nerd Font glyphs without per-file color),
+# and `none` to disable icons entirely.
 #
+icon_theme: nerdfont
 # icon_theme: vscode
+# icon_theme: nerdfont-mono  # same glyphs as nerdfont, without per-file color
+# icon_theme: none  # to disable icons
+
+###############################################################
+# Bookmarks (Goto modal)
+# Pressing `alt-b` (or `b` in Command mode) opens the bookmarks
+# modal. Each entry binds a single character to a path. Inside the
+# modal, hit the bound key to jump straight to that location.
+#
+# `~`, ${HOME}, and ${XDG_CONFIG_HOME} are expanded.
+# `trash://` resolves to the platform trash directory.
+#
+# Omit the section entirely to use the four built-in defaults
+# (h: home, d: ~/Downloads, c: ${XDG_CONFIG_HOME} or ~/.config, t: trash).
+# Defining `bookmarks: []` (empty list) disables the defaults.
+#
+# bookmarks: [
+#     { key: 'h', path: '~' }
+#     { key: 'd', path: '~/Downloads' }
+#     { key: 'c', path: '${XDG_CONFIG_HOME}' }
+#     { key: 't', path: 'trash://' }
+# ]
+
+###############################################################
+# Backup suffix
+# Tail appended by the `:backup` verb when composing the
+# destination filename. Default is `.bak`. If `<name><suffix>`
+# already exists, broot bumps with `.1`, `.2`, … up to `.999` —
+# it never silently overwrites.
+#
+# backup_suffix: ".bak"
 
 ###############################################################
 # Special paths

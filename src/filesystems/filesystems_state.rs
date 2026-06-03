@@ -608,6 +608,7 @@ impl PanelState for FilesystemState {
                         PanelPurpose::None,
                         con,
                         HDir::Left,
+                        false,
                     )
                 } else {
                     // we ask the app to focus the panel to the left
@@ -626,6 +627,7 @@ impl PanelState for FilesystemState {
                         PanelPurpose::None,
                         con,
                         HDir::Right,
+                        true,
                     )
                 } else {
                     // we ask the app to focus the panel to the right

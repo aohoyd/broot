@@ -18,19 +18,11 @@ use {
         tree::TreeOptions,
         verb::*,
     },
-    crokey::crossterm::{
-        QueueableCommand,
-        cursor,
-    },
     std::path::{
         Path,
         PathBuf,
     },
-    termimad::{
-        Area,
-        CropWriter,
-        SPACE_FILLING,
-    },
+    termimad::Area,
 };
 
 /// an application state dedicated to previewing files.
@@ -55,6 +47,7 @@ impl PreviewState {
     pub fn new(
         source_path: PathBuf,
         pending_pattern: InputPattern,
+        line: LineNumber,
         preferred_mode: Option<PreviewMode>,
         tree_options: TreeOptions,
         con: &AppContext,
@@ -67,7 +60,10 @@ impl PreviewState {
             .as_ref()
             .map(|c| &c.output_path)
             .unwrap_or(&source_path);
-        let preview = Preview::new(preview_path, preferred_mode, con);
+        let mut preview = Preview::new(preview_path, preferred_mode, con);
+        if line > 0 {
+            preview.try_select_line_number(line);
+        }
         PreviewState {
             preview_area,
             dirty: true,
@@ -162,6 +158,45 @@ impl PanelState for PreviewState {
         PanelStateType::Preview
     }
 
+    /// Override the default frame title with `{filename}  •  {info}`,
+    /// where `info` is the variant's `info_string` (e.g. `"42 lines"`,
+    /// `"1024 bytes"`). When `info` is `None` the title is just the
+    /// filename. When the composed title overflows `max_w`, only the
+    /// filename gets truncated with `…`; the info clause is preserved.
+    fn frame_title(
+        &self,
+        max_w: u16,
+    ) -> String {
+        let filename = self
+            .source_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "???".to_string());
+        let info = self.preview.info_string();
+        let max_w = max_w as usize;
+        match info {
+            Some(info) => {
+                let separator = "  •  ";
+                // Measure visual width, not char count — the bullet is
+                // one cell but multi-byte; `unicode_width` is the source
+                // of truth used elsewhere in the frame layer.
+                let info_width = unicode_width::UnicodeWidthStr::width(info.as_str())
+                    + unicode_width::UnicodeWidthStr::width(separator);
+                if info_width >= max_w {
+                    // Info alone (with separator) wouldn't fit — fall back
+                    // to filename-only truncation.
+                    crate::display::frame::truncate_to_width(&filename, max_w)
+                } else {
+                    let filename_max = max_w - info_width;
+                    let truncated_filename =
+                        crate::display::frame::truncate_to_width(&filename, filename_max);
+                    format!("{truncated_filename}{separator}{info}")
+                }
+            }
+            None => crate::display::frame::truncate_to_width(&filename, max_w),
+        }
+    }
+
     fn set_mode(
         &mut self,
         mode: Mode,
@@ -226,10 +261,16 @@ impl PanelState for PreviewState {
     fn set_selected_path(
         &mut self,
         path: PathBuf,
+        line: LineNumber,
         con: &AppContext,
     ) {
-        let selected_line_number = if self.preview_path() == path {
-            self.preview.get_selected_line_number()
+        let selected_line_number = if line > 0 {
+            Some(line)
+        } else if self.source_path == path {
+            self.filtered_preview
+                .as_ref()
+                .and_then(|p| p.get_selected_line_number())
+                .or_else(|| self.preview.get_selected_line_number())
         } else {
             None
         };
@@ -272,7 +313,7 @@ impl PanelState for PreviewState {
         con: &AppContext,
     ) -> Command {
         self.dirty = true;
-        self.set_selected_path(self.source_path.clone(), con);
+        self.set_selected_path(self.source_path.clone(), 0, con);
         Command::empty()
     }
 
@@ -296,13 +337,14 @@ impl PanelState for PreviewState {
         disc: &DisplayContext,
     ) -> Result<(), ProgramError> {
         let state_area = &disc.state_area;
-        if state_area.height < 3 {
+        if state_area.height < 2 {
             warn!("area too small for preview");
             return Ok(());
         }
-        let mut preview_area = state_area.clone();
-        preview_area.height -= 1;
-        preview_area.top += 1;
+        // The filename + info that used to live on body row 0 now lives in
+        // the frame top-border title (see `frame_title` below). The body
+        // content therefore fills the full `state_area`.
+        let preview_area = state_area.clone();
         if preview_area != self.preview_area {
             self.dirty = true;
             self.preview_area = preview_area;
@@ -312,24 +354,7 @@ impl PanelState for PreviewState {
             disc.screen.clear_area_to_right(w, state_area)?;
             self.dirty = false;
         }
-        let styles = &disc.panel_skin.styles;
-        w.queue(cursor::MoveTo(state_area.left, 0))?;
-        let mut cw = CropWriter::new(w, state_area.width as usize);
-        let file_name = self
-            .source_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "???".to_string());
-        cw.queue_str(&styles.preview_title, &file_name)?;
-        let info_area = Area::new(
-            state_area.left + state_area.width - cw.allowed as u16,
-            state_area.top,
-            cw.allowed as u16,
-            1,
-        );
-        cw.fill(&styles.preview_title, &SPACE_FILLING)?;
         let preview = self.filtered_preview.as_mut().unwrap_or(&mut self.preview);
-        preview.display_info(w, disc.screen, disc.panel_skin, &info_area)?;
         if let Err(err) = preview.display(w, disc, &self.preview_area) {
             warn!("error while displaying file: {:?}", &err);
             if preview.get_mode().is_some() {
@@ -486,5 +511,192 @@ impl PanelState for PreviewState {
         } else {
             self.pending_pattern.raw.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::{
+            app::Mode,
+            hex::HexView,
+            tree::TreeOptions,
+        },
+        std::path::PathBuf,
+    };
+
+    /// Build a `PreviewState` directly for unit testing, bypassing the
+    /// regular `new` constructor (which needs an `AppContext`). Only the
+    /// fields read by `frame_title` need to be meaningful; the rest are
+    /// filled with defaults / inert values.
+    fn make_state(
+        source_path: PathBuf,
+        preview: Preview,
+    ) -> PreviewState {
+        PreviewState {
+            preview_area: Area::uninitialized(),
+            dirty: true,
+            source_path,
+            transform: None,
+            preview,
+            pending_pattern: InputPattern::none(),
+            filtered_preview: None,
+            removed_pattern: InputPattern::none(),
+            preferred_mode: None,
+            tree_options: TreeOptions::default(),
+            mode: Mode::Input,
+        }
+    }
+
+    #[test]
+    fn frame_title_filename_only_when_info_none() {
+        // ZeroLen's `info_string` returns None — frame title is just the
+        // filename.
+        let path = PathBuf::from("/tmp/zero.dat");
+        let preview = Preview::ZeroLen(ZeroLenFileView::new(path.clone()));
+        let state = make_state(path, preview);
+        assert_eq!(state.frame_title(80), "zero.dat");
+    }
+
+    #[test]
+    fn frame_title_filename_plus_info_fits() {
+        // HexView reports `"{len} bytes"` — round trip through
+        // `frame_title` produces `"{filename}  •  {N} bytes"`.
+        let mut path = std::env::temp_dir();
+        path.push("broot_preview_frame_title_fits_test.bin");
+        std::fs::write(&path, b"1234567890").expect("write tempfile");
+        let hv = HexView::new(path.clone()).expect("hex view");
+        let preview = Preview::Hex(hv);
+        let state = make_state(path.clone(), preview);
+        let title = state.frame_title(100);
+        let basename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap();
+        assert_eq!(title, format!("{basename}  •  10 bytes"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn frame_title_truncates_filename_only() {
+        // Long filename + info; max_w too small for both. The filename
+        // must be the only thing that gets `…` truncation; the info
+        // clause must be preserved verbatim.
+        let mut path = std::env::temp_dir();
+        path.push("broot_preview_frame_title_trunc_test_a_very_long_filename_for_truncation_testing.bin");
+        std::fs::write(&path, b"12345").expect("write tempfile");
+        let hv = HexView::new(path.clone()).expect("hex view");
+        let preview = Preview::Hex(hv);
+        let state = make_state(path.clone(), preview);
+        let title = state.frame_title(40);
+        // Width-bound: total title must fit in 40 columns.
+        assert!(
+            unicode_width::UnicodeWidthStr::width(title.as_str()) <= 40,
+            "title width exceeded 40: {:?}",
+            title,
+        );
+        // Separator and info clause must be present verbatim.
+        assert!(
+            title.contains("  •  5 bytes"),
+            "info clause missing or truncated in: {:?}",
+            title,
+        );
+        // The filename portion must be the part that got truncated.
+        assert!(
+            title.contains('…'),
+            "expected truncation indicator in: {:?}",
+            title,
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn frame_title_info_overflow_falls_back_to_filename() {
+        // `max_w` is smaller than `"  •  {info}"` would need. The
+        // implementation falls back to filename-only truncation rather
+        // than emitting an empty filename + info.
+        let mut path = std::env::temp_dir();
+        path.push("broot_preview_frame_title_overflow_test_a_b_c.bin");
+        std::fs::write(&path, b"12345").expect("write tempfile");
+        let hv = HexView::new(path.clone()).expect("hex view");
+        let preview = Preview::Hex(hv);
+        let state = make_state(path.clone(), preview);
+        // `"  •  5 bytes"` = 12 cols. max_w = 8 forces fallback.
+        let title = state.frame_title(8);
+        assert!(
+            unicode_width::UnicodeWidthStr::width(title.as_str()) <= 8,
+            "title width exceeded 8: {:?}",
+            title,
+        );
+        // No bullet separator in fallback form.
+        assert!(
+            !title.contains('•'),
+            "fallback path should not include the separator, got: {:?}",
+            title,
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn frame_title_no_filename_uses_placeholder() {
+        // A path with no file_name component (e.g. `/`) falls back to
+        // the `???` placeholder.
+        let path = PathBuf::from("/");
+        let preview = Preview::ZeroLen(ZeroLenFileView::new(path.clone()));
+        let state = make_state(path, preview);
+        assert_eq!(state.frame_title(80), "???");
+    }
+
+    #[test]
+    fn frame_title_max_w_zero_returns_empty() {
+        // Boundary: max_w == 0 → nothing visible. Width must be 0.
+        let path = PathBuf::from("/tmp/zero.dat");
+        let preview = Preview::ZeroLen(ZeroLenFileView::new(path.clone()));
+        let state = make_state(path, preview);
+        let title = state.frame_title(0);
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(title.as_str()),
+            0,
+            "title at max_w=0 must be width-0, got: {:?}",
+            title,
+        );
+    }
+
+    #[test]
+    fn frame_title_max_w_one_fits_in_one_column() {
+        // Boundary: max_w == 1. The filename "zero.dat" is 8 columns,
+        // so it must be truncated to fit in 1 — `truncate_to_width`
+        // returns just "…". Pin the exact value so a regression that
+        // returns "" instead of "…" is caught.
+        let path = PathBuf::from("/tmp/zero.dat");
+        let preview = Preview::ZeroLen(ZeroLenFileView::new(path.clone()));
+        let state = make_state(path, preview);
+        let title = state.frame_title(1);
+        assert_eq!(title, "\u{2026}");
+    }
+
+    #[test]
+    fn frame_title_info_overflow_exact_boundary() {
+        // Boundary: `info_width == max_w`. The current implementation
+        // uses `>=`, which falls back to filename-only at the exact
+        // equality. Pin this so a future change to `>` would be
+        // caught.
+        //
+        // "  •  5 bytes" = 12 cols (2 + 1 + 2 + 7); set max_w = 12.
+        let mut path = std::env::temp_dir();
+        path.push("broot_preview_frame_title_boundary_test.bin");
+        std::fs::write(&path, b"12345").expect("write tempfile");
+        let hv = HexView::new(path.clone()).expect("hex view");
+        let preview = Preview::Hex(hv);
+        let state = make_state(path.clone(), preview);
+        let title = state.frame_title(12);
+        // At equality, fallback path: no `•` in the title.
+        assert!(
+            !title.contains('•'),
+            "exact-boundary should fall back to filename-only, got: {:?}",
+            title,
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -13,6 +13,7 @@ use {
             ClearType,
         },
     },
+    std::io::Write as _,
     termimad::Area,
 };
 
@@ -70,16 +71,23 @@ impl Screen {
         w.queue(Clear(ClearType::UntilNewLine))?;
         Ok(())
     }
-    /// clear the area and everything to the right.
-    /// Should be used with parcimony as it could lead to flickering.
+    /// Clear exactly the cells inside `area` (does not extend past
+    /// `area.left + area.width`). Should be used with parcimony as it
+    /// could lead to flickering.
+    ///
+    /// The historical name is kept for backwards-compat with callers,
+    /// but the behaviour is now bounded — clearing past the right edge
+    /// would wipe the panel's right frame border (added in the frame
+    /// inset work). Each row is filled with `area.width` ASCII spaces.
     pub fn clear_area_to_right(
         self,
         w: &mut W,
         area: &Area,
     ) -> Result<(), ProgramError> {
+        let blank: String = " ".repeat(area.width as usize);
         for y in area.top..area.top + area.height {
             self.goto(w, area.left, y)?;
-            self.clear_line(w)?;
+            write!(w, "{blank}")?;
         }
         Ok(())
     }

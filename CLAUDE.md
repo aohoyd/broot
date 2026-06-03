@@ -1,0 +1,833 @@
+# CLAUDE.md
+
+Project-specific notes for future agents working on broot. Each section
+records a non-obvious invariant that production code already depends on;
+reading the code alone will not surface most of these. If a change here
+starts to read like a feature changelog, delete it.
+
+## Frame inset and area math
+
+Every `Areas` carries two rectangles. `Areas::state_outer` is the full
+panel rect including the 1-cell frame edge on every side;
+`Areas::state` is the interior rect, inset by 1 cell on each side
+(`src/display/areas.rs:14-22`). The frame drawer paints into
+`state_outer`. All panel content (tree, preview, stage, input row,
+status row) paints into `state`. Mixing them either draws on top of the
+frame or leaves a 1-cell gap.
+
+`BrowserState::page_height` returns `screen.height - 4`
+(`src/browser/browser_state.rs:142-148`): minus 1 for the input row,
+1 for the status row, and 1 for each of the top/bottom frame edges.
+Any new `PanelState` impl that does its own page arithmetic must
+mirror this — see `move_selection` / `try_select_next_filtered` for the
+call sites that drive scroll math.
+
+Click hit-testing uses `state_outer`
+(`src/app/app_panels.rs:420`). A click on the frame border still
+selects the panel underneath; do not switch this to `state` or the
+1-cell border becomes a dead zone.
+
+Frame helpers live in `src/display/frame.rs`. `draw_frame` and
+`draw_frame_title` both take `&StyleMap` — broot has no `Palette` type
+(elio does, but we never imported it). The `frame_title` style key was
+added to `StyleMap` at `src/skin/style_map.rs:230`. Re-using `selected_line`
+or another nearby key for the title will silently swap styles and the
+test in `frame.rs` will keep passing because it only checks glyph bytes.
+
+## Overlay routing — single field, single render hook, single key hook
+
+`App::overlay: Option<Overlay>` (`src/app/app.rs:81`) is the only
+floating-modal state. Do not introduce a parallel flag or a stack —
+the variants of `Overlay` (`src/app/overlay/mod.rs:127-137`,
+currently `Confirm`, `Goto`, `Add`, `Sort`, plus a test-only `Stub`)
+cover every floating-modal need we have, and the rest of the routing
+assumes "at most one".
+
+Render hook: `display_panels` post-passes the overlay after every panel
+has been drawn (`src/app/app.rs:983` and `:993` pass
+`self.overlay.as_ref()` down). Key/mouse hook: when `overlay.is_some()`,
+the event loop dispatches to `overlay.handle_key` /
+`overlay.handle_mouse` before `Panel::apply_command` ever sees the
+event (`src/app/app.rs:1028-1049`).
+
+The four `OverlayOutcome` variants decide what happens after the
+handler runs (`src/app/app.rs:1018-1063`):
+
+- `Stay` — event consumed, overlay remains.
+- `Close` — overlay dropped. The Close arm also calls
+  `clear_pending_runs_slots`, which drops EVERY `pending_*` payload
+  (currently `pending_bulk_rename` AND `pending_backup`) so a cancelled
+  confirm doesn't leave a stale plan that a later direct
+  `:*_apply` invocation could pick up. Adding a new `pending_*` field
+  means extending the helper — see the "Backup" sub-section's
+  four-touchpoint rule.
+- `CloseAndRun(cmd)` — overlay dropped, `App::skip_confirm = true`,
+  then `cmd` re-enters `apply_command`. The `skip_confirm` flag
+  (`src/app/app.rs:88`, cleared at `:218`) is the loop-avoidance
+  signal — without it the destructive verb would re-open the same
+  overlay. Cleared unconditionally on every dispatch.
+  `App::pending_bulk_rename: Option<RenameRun>` is the sibling
+  payload field for bulk rename — the rename plan rides through the
+  same `CloseAndRun(":bulk_rename_apply")` re-dispatch but lives on
+  `App` rather than inside the command (see the "Bulk rename"
+  sub-section below for the full pattern).
+- `CloseAndFocus(path)` — overlay dropped, a synthetic `:focus <path>`
+  `VerbInvocation` is dispatched.
+
+Adding a new overlay variant means editing three places only: the
+`Overlay` enum, and each of the three dispatch shims (`render`,
+`handle_key`, `handle_mouse`). There is no extra plumbing — no event
+filter, no panel callback, no `CmdResult` variant beyond the existing
+`OpenOverlay` (`src/app/app.rs:553`).
+
+### Add modal — `Internal::add` / `AddOverlay`
+
+`Internal::add` is the create-file-or-directory entry point. It is
+**browser-only** by design: the handler lives in
+`BrowserState::on_internal` (`src/browser/browser_state.rs:823`); for
+every other panel type the wildcard arm in `on_internal_generic`
+returns `CmdResult::Keep` so the keypress is silently consumed.
+
+The target directory for the modal is chosen by
+`resolve_add_target_dir` (`src/browser/browser_state.rs:59`): if the
+current selection is a directory, create inside it; otherwise create
+alongside the selection (i.e. its parent). The bound key is `alt-n`
+(`src/verb/verb_store.rs:292`).
+
+`AddOverlay::try_commit` returns `OverlayOutcome::CloseAndFocus(full)`
+on success — the App synthesizes a `:focus <full>` invocation so the
+just-created entry becomes selected and the tree scrolls to it. The
+overlay also bails out as a no-op render when
+`area.width < 8 || area.height < 5` (`src/app/overlay/add.rs:227`) so
+pathologically small terminals don't draw a half-frame.
+
+Overwrite policy: `try_commit` refuses to clobber an existing entry.
+After validation passes, the helper probes `full.exists()` and, if
+true, sets `self.error = "file or directory already exists"` and
+returns `Stay` — the user picks a different name. This matches the
+codebase's "destructive operations require a confirm overlay" policy:
+silently truncating an existing file (which `fs::File::create` would
+do) would bypass the confirm intercept entirely, and a `:add` modal
+that surprises a user by wiping their work is a footgun. There is no
+"force overwrite" path — destructive replacement is the job of
+`:rm` + `:add`, both of which already prompt.
+
+`maybe_bulk_stage_confirm` skips `Internal::add` (alongside the
+bulk-rename internals) so pressing `alt-n` while the stage panel is
+active with 2+ staged paths opens the Add modal directly rather than
+a spurious "Run :add on N files?" prompt.
+
+### Bulk rename — App-level intercept and `pending_bulk_rename` payload
+
+The `Internal::bulk_rename` and `Internal::bulk_rename_apply` arms do
+**not** live in a `PanelState::on_internal` — they fire at the App
+level, intercepted at the top of `App::apply_command` (after the
+confirm intercept, before panel dispatch). The reason: the entry leg
+reads `app_state.stage`, suspends the TUI to run `$EDITOR`, plans the
+rename set, and opens a `ConfirmOverlay` — all `App`-level concerns
+that don't reduce to a panel-state callback. The lookup uses the
+`resolved_internal(cmd, con)` helper which recognises all three
+command shapes (`Command::Internal`, `Command::VerbTrigger`,
+`Command::VerbInvocate`) that can resolve to an internal.
+
+`App::pending_bulk_rename: Option<bulk_rename::RenameRun>` is the
+payload field, mirroring the `skip_confirm` single-field discipline.
+The entry leg (`run_bulk_rename`) populates it then opens the confirm
+overlay with `Command::from_raw(":bulk_rename_apply", true)` as the
+pending command. The overlay's `CloseAndRun` re-dispatches that
+command, which lands back in `apply_command`, the intercept matches
+again, and the apply leg (`run_bulk_rename_apply`) `mem::take`s the
+field. No `Command` enum payload changes — the run never travels
+through a command.
+
+**F2 dual-registration**: both the internal `bulk_rename` (in
+`add_builtin_verbs` directly before the rename external) and the
+external `rename` verb bind F2. `find_key_verb` returns the first
+verb in registration order whose filters pass, so the internal wins.
+F2 always goes through the bulk flow — `run_bulk_rename` collects
+paths via the shared `collect_bulk_paths` helper
+(`stage || [selection]`, `src/app/app.rs:1492`), so a single
+selection is treated as a 1-element bulk run. The external `rename`
+verb is still callable as a typed `:rename newname` invocation from
+the command bar, but F2 no longer reaches it. The pin test
+`f2_resolves_to_internal_bulk_rename_before_external_rename`
+(`src/verb/verb_store.rs::bulk_rename_routing_tests`) catches any
+registration-order regression.
+
+**Apply partial-failure semantics**: `bulk_rename::apply` is two-phase
+(`src/bulk_rename/mod.rs`'s `apply` function); cycles are resolved by
+renaming the source to `<name>.broot-bulk-tmp-{idx}` first, then
+renaming the temp onto the final target in a second pass. On the
+first `fs::rename` error the apply returns
+`Err((PathBuf, io::Error))` immediately — entries before the failure
+stay applied, no rollback. The status row gets the failing path and
+error message, the stage is NOT cleared (so the user can re-run from
+the surviving subset), and all panels refresh so the tree reflects
+the partial state. Phase-1 temps that survive a phase-2 failure are
+intentionally left on disk under their `.broot-bulk-tmp-{idx}` names.
+
+The bulk-stage confirm intercept (`maybe_bulk_stage_confirm`) never
+runs for `Internal::bulk_rename` / `Internal::bulk_rename_apply`
+because the App-level intercept catches them first — they don't
+reach the deny-list check at all.
+
+### Backup — two-internal split, `pending_backup` payload, suffix config
+
+`:backup` (bound to `alt-shift-b`) follows the same App-level
+intercept shape as bulk rename. Two internals
+(`src/verb/internal.rs:56-57`), registered together at
+`src/verb/verb_store.rs:284-286`:
+
+- `Internal::backup` — keyed trigger, `auto_exec:true` (the default
+  for `add_internal`). The intercept at `src/app/app.rs:258-263`
+  routes to `run_backup`. Always plans a bulk run; single-file is
+  N=1 bulk, not a separate code path.
+- `Internal::backup_apply` — bulk receiver, `auto_exec:true`,
+  registered with `no_doc()` and no key. Only reachable via the
+  confirm overlay's `CloseAndRun(":backup_apply")` re-dispatch.
+
+Both internals MUST stay `auto_exec:true` or the keystroke + overlay
+re-dispatch breaks silently. Two pin tests catch regressions:
+`backup_internals_registered` (`src/verb/verb_store.rs:1322-1357`)
+and `backup_keybind_resolves_to_trigger`
+(`src/verb/verb_store.rs:1369-1381`). The first test also asserts
+NEGATIVELY that `backup_one` (the deleted single-file receiver) is
+absent — if anything ever resurrects the variant AND registers it,
+the test fails so the dead receiver gets removed.
+
+`App::pending_backup: Option<crate::backup::BackupRun>`
+(`src/app/app.rs:108`) is the payload field, mirroring
+`pending_bulk_rename`. `run_backup` (`src/app/app.rs:896`)
+collects paths via the shared `collect_bulk_paths` helper
+(`stage || [selection]`, `src/app/app.rs:1492`), plans the bulk
+run via `plan_bulk_backup`, stashes it on `pending_backup`, and
+opens a confirm overlay with `Command::from_raw(":backup_apply",
+true)` as the pending command. `run_backup_apply`
+(`src/app/app.rs:969-1003`) consumes the field via the
+`take_pending_backup_or_error` helper (`src/app/app.rs:1458-1473`).
+
+Cancellation cleanup lives in the shared `OverlayOutcome::Close` arm
+which calls the free function `clear_pending_runs_slots`
+(`src/app/app.rs:1445-1456`). Both `pending_bulk_rename` and
+`pending_backup` are dropped to `None` together, so a cancelled
+overlay can never leave a stale plan that a later direct
+`:backup_apply` would pick up. Adding a third pending-run payload
+requires a four-touchpoint edit:
+  1. extend `clear_pending_runs_slots`'s signature with the new
+     `&mut Option<…>`,
+  2. add the `= None` assignment inside its body,
+  3. pass the new slot from the `OverlayOutcome::Close` call site,
+  4. extend the `clear_pending_runs_slots_drops_every_field` pin test
+     in the `backup_routing_tests` module
+     (`src/app/app.rs:2628-2653`).
+
+**Numbered fallback and cap sentinel**: `next_free_backup_name`
+probes `{name}{suffix}` first, then `.1`..`.MAX_BACKUP_BUMP` (=999,
+`src/backup/mod.rs:62`). The 999 ceiling is a soft brake on
+pathological inputs — three digits, far past any realistic backup
+set. When the cap is exhausted, `plan_bulk_backup` emits a sentinel
+row with `dst == src` (`src/backup/mod.rs:115-137`); the apply step
+matches on this sentinel and surfaces a status error rather than
+running a self-copy. `run_backup` detects the sentinel BEFORE
+opening the confirm overlay (the `blocked_count > 0` branch in
+`src/app/app.rs:914-927`) and routes through the
+`cap_exhaust_message` helper (`src/app/app.rs:1541`) which
+renders the singular vs plural form. The user sees a "too many
+existing backups for <path> (and N more)" status row enumerating the
+first blocked path plus the count of remaining blocked paths, and
+the overlay never appears. The `cap_exhaust_short_circuits_overlay`
+pin test (in `backup_routing_tests`) re-confirms the sentinel
+predicate (`c.src == c.dst`) and the message shape.
+
+**Suffix config plumbing checklist** — the standard four-touchpoint
+trap from "Bookmarks config plumbing":
+
+1. `Conf::backup_suffix: Option<String>` with
+   `#[serde(alias = "backup-suffix")]` at `src/conf/conf.rs:133-134`.
+2. `overwrite!(self, backup_suffix, conf)` in `Conf::read_file`
+   at `src/conf/conf.rs:269` — this is the merge line, forgetting
+   it makes the field "not work".
+3. `AppContext::backup_suffix: String` (always resolved, never
+   `Option`) at `src/app/app_context.rs:171`, populated in
+   `AppContext::from` (`:270-279`) with `is_valid_backup_suffix`
+   validation and default `".bak"`.
+4. `is_valid_backup_suffix` (`src/app/app_context.rs:182-184`)
+   rejects empty / contains `/`, `\\`, or `\0` — and only those four
+   conditions. Any other suffix (`~`, `.orig`, `_backup`) passes.
+   Rejection emits `cli_log::warn!` and falls back to `".bak"`.
+
+**`is_stage_consuming_internal` exclusion**: neither `Internal::backup`
+nor `Internal::backup_apply` appears in the deny-list
+(`src/app/app.rs:1603`). The reason mirrors the `bulk_rename` family:
+the App-level intercept at `src/app/app.rs:258-269` short-circuits
+both arms BEFORE they reach the panel-dispatch layer. (Note: this
+App-level arm actually runs AFTER `maybe_bulk_stage_confirm` in
+`apply_command`, but safety comes from the deny-list returning
+`false` for these internals — not from execution order.) If you ever
+move a backup leg out of the App-level intercept into a panel
+`on_internal`, add it to the deny-list at the same time — otherwise
+stage-≥2 invocations will silently bypass the bulk-stage confirm.
+
+## ConfirmOverlay sizing and soft-wrap
+
+Scope: applies to every `ConfirmOverlay` caller (bulk-rename,
+destructive verbs, mv/cp overwrite, bulk staging), not just
+bulk-rename. Placed alongside the bulk-rename sub-section because that
+is what motivated the dynamic-width and soft-wrap work, but the
+behaviour is generic.
+
+`ConfirmOverlay::render` sizes the modal in this order
+(`src/app/overlay/confirm.rs:155-205`):
+
+1. **Width**: `want_w = max(content_w, title_w, buttons_w, 40).min(80%
+   of screen.width)`. Each of the first three terms includes a 4-cell
+   horizontal-padding allowance. All widths use `UnicodeWidthStr::width`
+   (so CJK double-width chars cost 2 cells each). Floor 40 keeps short
+   rm/trash prompts from collapsing; 80% cap prevents edge-to-edge
+   modals on wide terminals. Body widths are saturating-cast to `u16`
+   to avoid silent overflow on pathological inputs. There is no
+   `Confirm::with_width(_)` knob — the sizing is derived, not
+   configured.
+2. **Wrap**: body lines containing `" → "` that overflow `inner_width`
+   (= `want_w - 4`) soft-wrap via `wrap_diff_line`
+   (`src/app/overlay/confirm.rs:417`): the prefix paints on one row,
+   the arrow + suffix paints on a continuation row indented by
+   `min(from_width + 1, 10)` spaces. The `+1` aligns the continuation
+   `→` one column to the right of the original arrow column (under
+   the space that preceded it), not directly under the arrow. The
+   indent **collapses to 0** when even the indented continuation would
+   overflow `inner_width` — visibility of the new path beats column
+   alignment. Lines without `" → "` are returned unchanged by
+   `wrap_diff_line` and reach `truncate_to_width` at render time
+   (`src/app/overlay/confirm.rs:255`); the `truncate_with_ellipsis`
+   branch only fires on the last painted row when the body overflows
+   the visible window AND more rendered rows remain below the cut
+   (`:252`). Typical short rm/trash bodies fit inside the window, so
+   their lines never see the ellipsis — they paint verbatim (or
+   tail-truncated by `truncate_to_width` if a single line is wider
+   than `inner_width`).
+3. **Height**: `want_h = (rendered.len() + 5).min(15)` where `rendered`
+   is the **post-wrap** row vector. This is what lets the modal grow
+   when many body lines wrap to two rows. A 5-line body where every
+   line wraps produces `rendered.len() = 10` → `want_h = 15`, not 10.
+
+Body iteration in `render` walks `rendered` (post-wrap), and the
+in-render `max_scroll` operates on `rendered.len()`. `handle_key(down)`
+does NOT see the post-wrap count (no render area), so it clamps
+against an upper bound of `body.len() * 2 - 1` — safe because
+`wrap_diff_line` produces at most 2 rows per input. The precise
+re-clamp happens in `render`. The two clamps are independent values,
+not the same expression.
+
+## Verb confirmation system
+
+`Verb::requires_confirm: bool` (`src/verb/verb.rs:81`) is the explicit
+always-on destructive-verb signal, set via `Verb::with_confirm(true)`
+at registration time (`src/verb/verb_store.rs:338-343` for the built-in
+`:rm` external verb). Users override it per-verb through
+`VerbConf::confirm: Option<bool>` — see the apply path at
+`src/verb/verb_store.rs:571`.
+
+`:trash` is **not** registered with `with_confirm`. Its confirmation
+fires from a hardcoded name/internal check inside
+`App::maybe_destructive_confirm` — the function recognises both
+`Internal::trash` directly and a `:trash` verb whose `execution`
+maps to `Internal::trash`. This is intentional: keeping the
+`requires_confirm` flag off lets users opt out by re-binding the
+internal in their own `conf.hjson` (because the `confirm` field only
+overrides the per-verb flag, not the App-level intercept). If you ever
+add another internal that should always confirm, follow the same
+pattern: enumerate it explicitly in the intercept, do not pile a
+`requires_confirm`-equivalent on `Internal`.
+
+Do not heuristic-detect destructive verbs from the shell exec string
+(e.g. matching `rm -rf` in the exec pattern). External verbs default to
+`requires_confirm: false`; if a user writes a destructive external verb
+they must opt in via `confirm: true` in their `conf.hjson`. The unit
+test at `src/verb/verb_store.rs:756-781` pins this behaviour.
+
+The intercept lives in `App::apply_command` and runs three checks in
+order (`src/app/app.rs:184-217`). At most one overlay opens per
+dispatch; the first match wins:
+
+1. Bulk staging — `App::maybe_bulk_stage_confirm`
+   (`src/app/app.rs:707`). Fires only when the stage panel is the
+   active panel and `app_state.stage.len() >= 2`. The internal-side
+   logic is a **deny-list**: confirm only when the resolved verb is
+   external, or when the resolved internal is in
+   `is_stage_consuming_internal` (`src/app/app.rs:1603`). Everything
+   else — navigation, app-level verbs (`:quit`, `:help`, `:back`,
+   `:escape`, `:refresh`), panel switching, every `:toggle_*`, every
+   `:sort_by_*`, every `:input_*`, search, bookmarks, stage-management
+   itself, `:focus`, the bulk-rename and add modals — bypasses
+   automatically. The deny-list has nine entries:
+
+   | Internal | Why it fans out |
+   |---|---|
+   | `copy_from_staging` | Copies N staged files to a destination |
+   | `move_from_staging` | Moves N staged files to a destination |
+   | `trash` | Sends N staged files to trash |
+   | `open_stay` | Opens N files externally without leaving broot |
+   | `open_leave` | Opens N files externally and exits broot |
+   | `open_preview` | Opens N files in the preview pane |
+   | `print_path` | Prints all staged absolute paths to stdout |
+   | `print_relative_path` | Prints all staged relative paths |
+   | `print_tree` | Prints the tree of staged paths |
+
+   New internals that iterate the stage MUST be added here, or they
+   will silently bypass the confirm and run without a user warning.
+   The doc-comment above `is_stage_consuming_internal` repeats this
+   invariant.
+2. Overwrite check — resolved destination of `:cp`/`:mv` already
+   `exists()`.
+3. Per-verb `requires_confirm` (and the `Internal::trash` shape, which
+   is recognised from the resolved `Verb`, not from any per-internal
+   flag — `src/app/app.rs:604`, `:629`, `:650`).
+
+`skip_confirm` and an already-open overlay both bypass the intercept
+(`src/app/app.rs:198`). The bookkeeping is symmetric: a re-dispatched
+command from `CloseAndRun` clears its bypass on the way through
+(`:218`), so a verb that itself opens a new overlay (none exist today,
+but the door is open) still gets the next round of checks.
+
+## Stage-key unification — single arm, single advance helper
+
+`+`, `=`, and `ctrl-g` all bind `Internal::stage` (not
+`Internal::toggle_stage`). Before unification, `=` and `ctrl-g`
+toggled — pressing them a second time on the same path would unstage
+it. The new contract: all three keys are add-only fast-stagers that
+also advance the cursor by one (non-cycling) — staging the last
+selectable entry leaves the cursor on the last entry rather than
+wrapping to the root. Use `-` (still bound to `Internal::unstage`) to
+remove a single staged path; use `:clear_stage` to drop the whole
+stage.
+
+`Internal::toggle_stage` stays registered without a default key
+binding (`src/verb/verb_store.rs:354-357` registers `stage` with the
+three keys; the `toggle_stage` registration nearby carries no
+`.with_key(...)`). Users who want the old toggle semantics on their
+own keystroke can bind it via `conf.hjson` — `:toggle_stage` resolves
+by name like any other verb.
+
+`BrowserState::on_internal` collapses both `Internal::stage` and
+`Internal::toggle_stage` into a single combined match arm
+(`src/browser/browser_state.rs:843-847`) so the two internals are
+indistinguishable inside the tree panel. The arm body is two steps:
+`self.stage(...)` (which delegates to `Stage::add` — idempotent on a
+re-stage) then `advance_after_stage(self.displayed_tree_mut(),
+page_height)`. `advance_after_stage`
+(`src/browser/browser_state.rs:49-58`) is a free function holding the
+`move_selection(1, page_height, false)` call — extracted so the
+arm-body's contract is unit-testable. Tests call the SAME helper the
+arm calls; a drift in the cycle flag, the step value, or the page-
+height argument shows up immediately.
+
+On other panel types (`StageState`, `PreviewState`, etc.) the
+`toggle_stage` internal falls through to the trait-default
+`PanelState::toggle_stage` at `src/app/panel_state.rs:995`, which
+preserves the old add-or-remove semantics. Only the browser-panel
+arm is opinionated about "add-only + advance".
+
+Pin tests:
+- `stage_keys_bound_to_stage_not_toggle` in
+  `src/verb/verb_store.rs::staging_bindings_tests` — checks all three
+  keys resolve to `Internal::stage` AND that `toggle_stage` stays
+  registered but unbound.
+- `toggle_stage_now_acts_like_stage` in
+  `src/browser/browser_state.rs::tests` — pins the add-only +
+  advance combined post-condition by calling the same
+  `advance_after_stage` helper the arm body calls.
+- `non_stage_consuming_internals_bypass_confirm` in
+  `src/app/app.rs` — pins that both `Internal::stage` and
+  `Internal::toggle_stage` are NOT in the bulk-stage deny-list (they
+  don't fan out across the stage's contents).
+
+## Bookmarks config plumbing
+
+`Conf::bookmarks: Option<Vec<BookmarkConf>>` (`src/conf/conf.rs:135`).
+The serde field is necessary but not sufficient — the merge line at
+`src/conf/conf.rs:267` is what actually copies user values onto the
+running `Conf`. Forgetting that line is the single most common way a
+new config field "doesn't work" in broot; the comment at lines 262-266
+records why this particular field uses plain `overwrite!` rather than
+`overwrite_vec!`: a user supplying an empty list must replace the
+defaults, and `overwrite_vec!` would append.
+
+`BookmarkEntry` runtime expansion happens once, at `AppContext`
+construction (`src/app/app_context.rs:252`, calling
+`build_bookmarks`), not at navigation time. `~`, `${HOME}`,
+`${XDG_CONFIG_HOME}`, and `trash://` (platform-resolved) are expanded
+exactly once. Bookmarks that can't be resolved are dropped with a
+warning at that point.
+
+Built-in defaults live in `default_bookmarks`
+(`src/app/bookmark.rs:166-176`) and fire when the `bookmarks` key is
+absent from the user's `conf.hjson` (`build_bookmarks` matches on
+`None`). When you edit the defaults you must also edit the
+commented-out example block
+in `resources/default-conf/conf.hjson:106-122` — these are the
+literals users start from when they uncomment, and they must stay in
+sync.
+
+Duplicate-key policy: first definition wins, later duplicates are
+dropped with `cli_log::warn!` (`src/app/bookmark.rs::materialise`,
+the `out.iter().any(...)` guard near the top of the loop). The
+comparison is **case-sensitive** (`e.key == conf.key`) — `h` and `H`
+are independent bookmark slots, giving 52 letter bindings instead of
+26. The goto modal's single-char jump dispatch
+(`src/app/overlay/goto.rs`) mirrors this by comparing the keystroke
+char directly with `e.key == c`. Ordering in the user list is still
+load-bearing when the same exact char is repeated.
+
+## Icon defaults
+
+`AppContext::from` defaults `icon_theme` to `"nerdfont"` when the
+config field is absent (`src/app/app_context.rs:193`). The previous
+default — no icons at all — is no longer reachable without an explicit
+opt-out.
+
+The literal string `"none"` (case-insensitive) is the opt-out, handled
+in `icon_plugin` (`src/icon/mod.rs:16`). Returning `None` there causes
+the renderer to skip the icon column entirely. Any other unknown
+string also returns `None` but is treated as a misconfiguration rather
+than an intentional disable; users who want no icons should write
+`icon_theme: none`.
+
+Nerd Font glyphs are PUA codepoints. `unicode-width` reports them as
+1 cell, and the renderer pattern at
+`src/display/displayable_tree.rs:314-316` is `icon` + space — two cells
+in total. This was reduced from a 3-cell prefix in a prior pass after a
+user bug report about over-wide icon columns; the column math elsewhere
+in the tree assumes this 2-cell prefix. If you change the spacing,
+audit the callers that compute `cw.allowed`-style budgets and the
+content-extract path that subtracts a small constant from `cw.allowed`.
+
+### Icon coloring — `colors::resolve` and the two-pass paint
+
+The icon cell and the trailing space are painted on **different
+styles**. In `write_line_label` the icon glyph goes out with
+`compute_icon_style(...)` while the next `queue_char(..., ' ')` keeps
+`label_style` — keeping the space on `label_style` preserves bg
+continuity across the icon/name seam (selection bands, panel bg,
+ext_color overrides). The 2-cell prefix invariant from the "Icon
+defaults" paragraph above is unchanged.
+
+`compute_icon_style` (defined in `src/display/displayable_tree.rs`,
+just above `impl DisplayableTree`) has a short-circuit: when the
+caller's `has_ext_override` is `true` (i.e. the user's `ext_colors`
+config matched the file's extension), the icon returns
+`label_style.clone()` with NO Bold added — the user override wins on
+icon AND name, and bolding only the icon would visually split the row.
+Otherwise the function asks `IconPlugin::get_icon_color`, sets the fg
+if it returns `Some`, and adds `Attribute::Bold` (Bold matches elio's
+look and survives even when the plugin returns `None`).
+
+Symlinks behave like their own name's extension for the
+`has_ext_override` test, not their target's: when a user has
+`ext_colors[txt]` set and the row is `link.txt -> target.rs`, the
+override fires and both icon and name paint identically — the Rust
+target color is intentionally suppressed. This keeps every `.txt`-like
+row visually uniform regardless of symlink-ness. The plugin's per-type
+color lookup (when the override is absent) does still walk the target
+name, so a non-overridden symlink shows the target's icon color.
+
+`IconPlugin::get_icon_color` (`src/icon/icon_plugin.rs:13-21`) has a
+default impl returning `None`, so monochrome plugins need not
+implement it.
+
+The factory at `src/icon/mod.rs:17-43` recognises three icon-set
+names: `nerdfont` (colored, default), `nerdfont-mono` (same glyphs
+without per-file color — `.mono()` toggles the `FontPlugin::colored`
+flag the plugin checks before consulting `colors::resolve`), and
+`vscode` (also colored — palette is keyed by file type, not glyph
+set, so there is no `vscode-mono` variant). `icon_theme: none` still
+disables icons entirely.
+
+`colors::resolve` (`src/icon/colors.rs:517-541`) priority:
+
+```
+Pruning       → None          (current dimmed style preserved)
+Dir           → DIRNAME[name]                              ?? CLASS[Directory]
+File          → FILENAME[name] ?? EXT[double_ext] ?? EXT[ext] ?? CLASS[infer_class]
+SymLink       → resolve(final_target) as if it were a File
+BrokenSymLink → CLASS[Other]
+```
+
+Names and extensions are lowercased at lookup time, so the four
+`&'static [(&str, (u8, u8, u8))]` source slices (in file order:
+`CLASS_COLOR_PAIRS`, `EXT_COLOR_PAIRS`, `FILENAME_COLOR_PAIRS`,
+`DIRNAME_COLOR_PAIRS`) hold lowercase keys only — elio's
+case-duplicated entries (`"Public"`/`"public"`) collapse to one row.
+The `dirname_color` lookup uses `to_lowercase()` (Unicode-aware) so
+real-world directories like `Público`, `Imágenes`, `Música` fold to
+their table keys; `ext_color` and `filename_color` use
+`to_ascii_lowercase()` because file extensions and the registered
+filename anchors are ASCII. Slices are loaded into `FxHashMap`s via
+`once_cell::sync::Lazy` on first access. Values were transcribed from
+elio's effective resolved palette
+(`src/ui/theme/appearance/rules/{classes,extensions}.rs` overlaid with
+`assets/themes/default/theme.toml`); when the TOML and the Rust baseline
+disagreed, TOML won. Preserve that policy on updates.
+
+`DisplayableTree` carries `icon_plugin: Option<&(dyn IconPlugin + Send +
+Sync)>` (`src/display/displayable_tree.rs:62`). Active call sites:
+`src/browser/browser_state.rs` and `src/preview/dir_view.rs` forward
+the running plugin; `DisplayableTree::out_of_app`
+(`src/display/displayable_tree.rs:96-117`) and the `launchable.rs`
+offline-tree dump deliberately pass `None` — out-of-app tree text stays
+uncolored. New `DisplayableTree` construction sites default to `None`
+unless color is wanted.
+
+### Per-name directory glyphs
+
+`FontPlugin` carries a fifth lookup table
+`dir_name_to_icon_name_map: FxHashMap<&'static str, &'static str>`
+(`src/icon/font.rs`), populated only for `nerdfont` and `nerdfont-mono`.
+The vscode factory arm passes `&[]` (`src/icon/mod.rs`) so vscode keeps
+its single `default_folder` glyph for every directory — its icon set
+doesn't carry the Nerd Font PUA codepoints elio uses.
+
+The `TreeLineType::Dir` arm of `get_icon` calls `handle_dir(name)` which
+lowercases via `to_lowercase()` (unicode-aware) before consulting the
+map, so `Música`, `Público`, `Imágenes`, etc. match the lowercase keys.
+Matches parity with `dirname_color` at `src/icon/colors.rs:461`. Use
+`to_lowercase()` not `to_ascii_lowercase()` here for the same reason —
+the locale-collapsed home directories on non-English systems must hit.
+
+The data file is
+`resources/icons/nerdfont/data/dir_name_to_icon_name_map.rs` (53 dir
+entries, 28 unique codepoints). The codepoints were transcribed from
+elio's `assets/themes/default/theme.toml [directories]` and appended
+to `resources/icons/nerdfont/data/icon_name_to_icon_code_point_map.rs`
+with `dir_*` names (e.g., `dir_dotgit`, `dir_docs`). Entries beginning
+with a dot are prefixed `dir_dot*` to avoid collisions between a
+dotfile dir (`.config` → `0xe5fc`) and a plain dir (`config` → `0xf0493`).
+
+**Deliberately separate from `DIRNAME_COLOR_PAIRS`**: the glyph table
+(in `resources/icons/nerdfont/data/`) and the color table (in
+`src/icon/colors.rs`) are keyed on the same directory names but live
+in different layers — icon plugin vs color palette. Do not merge them.
+Adding a new dir entry means updating both layers; the existing
+`FontPlugin::sanity_check` debug-build guard catches typos in icon
+names, but no equivalent enforces that every glyph entry has a color
+counterpart (or vice-versa) — by design, the two layers can have
+asymmetric coverage.
+
+## Footer-zone theming
+
+All thirteen footer-zone style keys default to background `rgb(6, 11, 20)`
+(panel_alt), so the status row, input row, and flag hints share the
+dark-blue chrome. The keys are: `status_normal`, `status_italic`,
+`status_bold`, `status_code`, `status_ellipsis`, `status_job`,
+`flag_label`, `flag_value`, `input`, `purpose_normal`,
+`purpose_italic`, `purpose_bold`, `purpose_ellipsis`. See the table at
+`src/skin/style_map.rs:161-241`.
+
+Two intentional exceptions: `status_error` keeps `rgb(224, 90, 90)`
+(cut_bar red) so errors visually dominate the row; `mode_command_mark`
+inverts with `rgb(255, 178, 86)` (accent_warn) bg + `rgb(9, 16, 27)`
+fg + Bold so the command-mode caret stays the most prominent glyph on
+screen.
+
+User `skin:` overrides still beat these defaults — the override path
+through the `StyleMap!` macro (`src/skin/style_map.rs:69-105`) is
+unchanged. The pin test `footer_zone_uses_panel_alt_bg` at
+`src/skin/style_map.rs:298-326` prevents silent palette drift; if you
+intentionally edit the defaults, update the test alongside or it will
+catch you. `mode_command_mark` has its own pinned test
+(`mode_command_mark_uses_accent_warn_bg` at
+`src/skin/style_map.rs:371-381`) because its bg differs by design.
+
+## Preview frame title
+
+`PreviewState::frame_title(max_width)` (`src/preview/preview_state.rs:166-198`)
+returns `"{filename}  •  {info}"` when `Preview::info_string()` returns
+`Some` (`Preview::info_string` in `src/preview/preview.rs`), else just
+the filename. The bullet character is U+2022 (` • `) surrounded by 2
+spaces each side. Truncation policy: when the full string overflows
+`max_width`, the filename is truncated from the right with `…`; the
+info clause (short and informative) is never truncated. If even the
+filename + bullet won't fit, the title falls back to a bare truncated
+filename — no `•` appears. Empty / missing filename renders as
+`"???"`. `frame_title` returns `String` per the trait at
+`src/app/panel_state.rs:1154-1162`, not `Option<String>` — there is no
+no-op signal; the default and the `PreviewState` override both always
+return a non-empty fallback (`default_frame_title_for_type` for the
+default; `"???"` for the override's missing-filename case).
+
+The body row that used to hold filename + count is gone — content
+paints from `state_area.top` directly (was `state_area.top + 1`), and
+`self.preview_area = state_area.clone()` at
+`src/preview/preview_state.rs:350` (no longer insets the area). The
+per-variant `display_info` painters (in `src/preview/dir_view.rs`,
+`src/syntactic/text_view.rs`, `src/hex/hex_view.rs`,
+`src/image/image_view.rs`, `src/tty/tty_view.rs`) and the
+`Preview::display_info` dispatcher were deleted with the body-row
+removal; their text replacement is `info_string`, consumed by
+`frame_title`.
+
+## Tree root row + aux status
+
+`tree.lines[0]` still exists in memory as the root, but is **never
+painted** by `DisplayableTree::write_on`. The body loop iterates
+`tree.lines[1..]` starting at `state_area.top` (not
+`state_area.top + 1`); see `src/display/displayable_tree.rs` where
+`line_index = (y as usize) + 1 + tree.scroll`. The scrollbar offset
+starts at `area.top` and spans `area.height`, with total content rows
+`tree.lines.len() - 1`. The scrollbar paint loop writes to absolute
+row `y + self.area.top` (not the loop counter `y`) and compares
+against `compute_scrollbar`'s absolute `sctop`/`scbottom` — get this
+wrong and the thumb paints over the frame's top corner.
+
+Scroll math is interlocked with the +1 offset:
+- `Tree::try_scroll` uses `lines.len() - 1` as the scrollable length
+  and `lines.len() - 1 - page_height` as the max scroll.
+- `Tree::make_selection_visible` mirrors the same: "everything fits"
+  is `page_height >= lines.len() - 1`, and the clamp-to-bottom branch
+  is `scroll = lines.len() - 1 - page_height`.
+
+Click mapping: `Tree::try_select_y` maps a body y to
+`lines[y + 1 + scroll]`. Out-of-bounds returns `false` and leaves
+selection alone. `BrowserState::on_click` first subtracts the cached
+`body_top` (set during `display`) before calling `try_select_y` —
+clicks arrive in absolute terminal coords, the body row math is body-
+relative. `BrowserState::on_double_click` reconstructs the
+`line_index` from `y` the same way and compares to `tree.selection`,
+not to `y` (the post-shift selection is `line_index`, not `y`).
+
+`BrowserState::page_height` is unchanged at `screen.height - 4` — the
+freed root-row cell becomes one extra visible entry, the geometry
+math doesn't move. `Internal::back`, `Internal::focus`, and
+`BrowserState::open_selection_stay_in_broot` all key off
+`tree.selection == 0`, which is still valid because the data model
+didn't move; only rendering shifted.
+
+The three pieces of aux info that used to decorate the root row (git
+status summary, total size when `show_sizes`, mount-space bar when
+`show_root_fs`) now live at the right end of the wide status row.
+The data flows through `PanelState::status_aux` (trait default
+`None` at `src/app/panel_state.rs:1173`; only `BrowserState` overrides
+at `src/browser/browser_state.rs:973`). The carrier type
+`StatusAux` lives at `src/display/status_aux.rs`. Paint geometry lives
+in `src/display/status_line.rs:37-101`: aux is suppressed when
+`status.error == true` (errors win the row), when the row is too
+narrow (`aux_w + 4 > total_after_leading`), or when the aux is empty.
+Active-panel gating happens upstream — `WIDE_STATUS = true` means only
+the active panel calls `write_status`, so aux follows automatically
+without per-panel checks.
+
+The dead `write_root_line` painter was deleted entirely during the
+migration (along with the orphan `GitStatusDisplay`, `ComputationResult`,
+`UnicodeWidthChar`, `UnicodeWidthStr` imports in
+`displayable_tree.rs`). Restoring root-row rendering would mean
+rebuilding that painter and gating the body loop on a new toggle —
+not a trivial revert.
+
+## Frame title as selectable root
+
+The frame title is the visual carrier for the (still-hidden) tree
+root row's selection state. `PanelState::title_selected()` is the
+trait hook (default `false` at `src/app/panel_state.rs:1190`); only
+`BrowserState` overrides it, returning `displayed_tree().selection == 0`
+(`src/browser/browser_state.rs:991`). Future tree-like panels can opt in
+by overriding — every other panel type (Preview, Stage, Trash, Help,
+Fs) keeps the default and its title never highlights.
+
+Inactive panels still paint their title with the selection bg when
+`title_selected()` returns true — this mirrors the body's
+`selected_line` paint at `src/display/displayable_tree.rs:495`, which
+gates on `in_app` but not on `active`. So an inactive browser panel
+whose `selection == 0` shows a subtly-highlighted title using
+`unfocused.styles.selected_line.bg`, the same way its body row would
+have. Don't gate the title on `active` without also gating the body's
+selection paint — they're a pair.
+
+`draw_frame_title` (`src/display/frame.rs:137`) takes a
+`selected: bool`. When true, it clones the `frame_title` compound
+style and overlays `selected_line.get_bg()` onto it — fg/attrs of
+`frame_title` are preserved. If a custom skin leaves `selected_line`
+without a bg, the overlay is a no-op and the title falls back to the
+unstyled `frame_title` look (no panic, no visible bg). No new style
+key was added; the selected variant is a pure composition of two
+existing keys.
+
+`BrowserState::on_click` routes through `try_select_title_row(y)`
+before `body_relative_y(y)`. The helper sets `selection = 0` when
+`body_top > 0 && y == body_top - 1`. When it returns `true`,
+`on_click` returns `CmdResult::Keep` immediately and skips the
+body-relative `try_select_y` path — that short-circuit is what makes a
+title-row click semantically distinct from a body row's coordinate
+math. `on_double_click` follows the same pattern but additionally
+dispatches to `open_selection_stay_in_broot` after the title-row
+intercept, which means a double-click on the title navigates up
+(open_selection treats `selection == 0` as "go to parent"). The
+`body_top > 0` guard is load-bearing — on degenerate tiny terminals
+the frame collapses and `body_top == 0`, where `body_top - 1` would
+underflow `u16`. The narrow-panel case (`3 <= outer.width < 6`, where
+the top frame edge is drawn but no title glyph is painted) is
+deliberately not width-gated: a click on that edge still selects the
+root, matching the "top edge is the root's seat" intent. Those panels
+are pathological at that width anyway.
+
+Five production call sites pass the `selected` arg: the panel render
+in `src/app/app_panels.rs:712` forwards `panel.state().title_selected()`;
+the four overlay renderers (`src/app/overlay/goto.rs:195`,
+`src/app/overlay/confirm.rs:185`, `src/app/overlay/add.rs:245`,
+`src/app/overlay/sort.rs:148`) always pass `false` — overlays have no
+selectable root.
+
+### Sort overlay — `Internal::open_sort_overlay` / `SortOverlay`
+
+`SortOverlay` is stateless (unit struct at `src/app/overlay/sort.rs`).
+The overlay is opened by `Internal::open_sort_overlay` (bound to `o`
+in Command mode) and presents the seven sort modes as single-key
+shortcuts; `handle_key` returns `OverlayOutcome::CloseAndRun` carrying
+a synthesized `:sort_by_*` (or `:no_sort`) command that the App
+re-dispatches through `apply_command`.
+
+The `:sort_by_*` family of verbs are NOT in the bulk-stage
+deny-list (`is_stage_consuming_internal` at `src/app/app.rs:1603`)
+because they don't iterate the stage — they mutate the active panel's
+tree options. Any future sort-related internal that DOES consume the
+stage must be added to that deny-list, mirroring the rule for
+new stage-consuming internals documented in the "Verb confirmation
+system" section.
+
+The `f` and `l` shortcuts dispatch via name strings
+(`":sort_by_type_dirs_first"`, `":sort_by_type_dirs_last"`); both
+internals must therefore be registered in `add_builtin_verbs`
+(`src/verb/verb_store.rs`, alongside the other `sort_by_*` entries).
+The `sort_by_type_dirs_internals_registered` pin test in the
+`vim_bindings_tests` module catches accidental deregistration —
+without that, the overlay's `f`/`l` keys would silently fail with
+"verb not found" in the status row.
+
+## `:copy_file_content` size cap
+
+`MAX_COPY_FILE_CONTENT_BYTES` (`src/app/panel_state.rs:34`) is a
+10 MiB hard cap on the file size that `:copy_file_content`
+(bound to `Y` in Command mode, clipboard feature only) will read
+into memory and push to the clipboard. The cap is enforced in
+`read_file_content_for_clipboard`; the three rejection conditions
+are:
+
+- selection is not a regular file (directory, symlink target gone,
+  etc.) → `"Selection is not a regular file"`
+- file size strictly greater than the cap →
+  `"File too large to copy as text"`
+- contents are not valid UTF-8 → `"Binary content, cannot copy as text"`
+
+The cap is pragmatic, not arbitrary: clipboard backends typically
+refuse multi-MB payloads (or freeze the UI parsing them), and the
+overwhelming majority of clipboard-as-text use cases are configs,
+source files, and notes — all well under 10 MiB. There is no
+configuration knob; users who need a different cap edit the const.
+
+The size check uses `>` so a file at exactly the cap is accepted;
+the stat-vs-read distinction is preserved in the error messages
+(`"Cannot stat file:"` vs `"Cannot read file:"`) so users can
+tell which phase failed. A small TOCTOU window exists between the
+metadata size check and `fs::read`: a file that grows between the
+two calls can exceed the cap by a small amount. This is documented
+and accepted — closing the window would require streaming with a
+running byte counter, which is out of proportion for the use case.

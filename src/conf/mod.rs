@@ -8,6 +8,7 @@ use {
     },
 };
 
+mod bookmark_conf;
 mod conf;
 mod default;
 mod default_flags;
@@ -18,6 +19,7 @@ mod verb_conf;
 pub mod file_size;
 
 pub use {
+    bookmark_conf::BookmarkConf,
     conf::Conf,
     default::write_default_conf_in,
     default_flags::*,

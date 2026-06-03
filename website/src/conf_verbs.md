@@ -34,6 +34,7 @@ name  | default | role
 apply_to | | the type of selection this verb applies to: `"file"`, `"text_file"`, `"binary_file"`, `"directory"` or `"any"`. You may declare two verbs with the same key if the first one applies, eg, to only text files or only to directories
 auto_exec | `true` | whether to execute the verb as soon as it's key-triggered (instead of waiting for <kbd>enter</kbd>)
 cmd | | a semicolon sequence to execute, similar to an argument you pass to `--cmd`
+confirm | `false` | whether to ask the user to confirm before running the verb. Built-in `:rm` is registered with `confirm: true`. User-defined external verbs default to `false`; opt in with `confirm: true` for destructive ones. Use `confirm: false` on a built-in destructive verb to disable its prompt
 extensions | | optional array of allowed file extensions
 external | | execution, when your verb is based on an external command
 from_shell | `false` | whether the verb must be executed from the parent shell (needs `br`). As this is executed after broot closed, this isn't compatible with `leave_broot = false`
@@ -474,6 +475,7 @@ invocation | default key | default shortcut | behavior / details
 :escape | <kbd>esc</kbd> | - | escape from completions, current input, page, etc. (this internal can be bound to another key but should not be used in command sequences)
 :filesystems | - | fs | list mounted filesystems
 :focus | <kbd>ctrl</kbd><kbd>f</kbd> | - | set the selected directory the root of the displayed tree (don't remove the filtering pattern) |
+:goto_bookmarks | <kbd>g</kbd> | goto | open the goto/bookmarks modal — single-character keys jump to the bound path. See the `bookmarks` section in `conf.hjson`.
 :help | <kbd>F1</kbd> | - | open the help page (which can also be open with <kbd>?</kbd>)
 :line_down | <kbd>↓</kbd> | - | scroll one line down or select the next line (can be used with an argument eg `:line_down 4`)
 :line_down_no_cycle | - | - | same as line_down, but doesn't cycle

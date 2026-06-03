@@ -42,6 +42,9 @@ impl ExecPattern {
     pub fn has_other_panel_group(&self) -> bool {
         self.tokens.iter().any(|s| str_has_other_panel_group(s))
     }
+    pub fn has_staging_group(&self) -> bool {
+        self.tokens.iter().any(|s| str_has_staging_group(s))
+    }
     pub fn to_internal_pattern(&self) -> Option<String> {
         let first_token = self.tokens.first()?;
         if first_token.starts_with(':') || first_token.starts_with(' ') {

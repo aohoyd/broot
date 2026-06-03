@@ -46,7 +46,6 @@ pub use {
     write::*,
 };
 
-
 pub type VerbId = usize;
 
 pub fn str_has_selection_group(s: &str) -> bool {
@@ -66,3 +65,8 @@ pub fn str_has_other_panel_group(s: &str) -> bool {
     false
 }
 
+pub fn str_has_staging_group(s: &str) -> bool {
+    ARG_DEF_GROUP
+        .find_iter(s)
+        .any(|group| group.as_str() == "{staging}")
+}

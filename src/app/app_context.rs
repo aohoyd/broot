@@ -159,8 +159,28 @@ pub struct AppContext {
     /// layout modifiers, like divider moves
     pub layout_instructions: LayoutInstructions,
 
+    /// Resolved single-character bookmarks for the Goto modal.
+    ///
+    /// Built at AppContext load time from `Conf::bookmarks` (or
+    /// the built-in defaults if the user didn't declare any).
+    pub bookmarks: Vec<BookmarkEntry>,
+
+    /// Suffix appended to filenames by the `:backup` verb. Defaults
+    /// to `".bak"`. Validated and resolved at `AppContext::from`
+    /// time — see `is_valid_backup_suffix`.
+    pub backup_suffix: String,
+
     /// server name
     pub server_name: Option<String>,
+}
+
+/// Validate a user-supplied backup suffix. Empty strings and strings
+/// containing path separators (`/`, `\\`) or NUL bytes are rejected
+/// to avoid producing filenames that escape the parent directory or
+/// trip OS filename rules. Anything else (including unusual but valid
+/// suffixes like `~`, `.orig`, `_backup`) is accepted.
+pub(crate) fn is_valid_backup_suffix(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains('\0')
 }
 
 impl AppContext {
@@ -182,7 +202,10 @@ impl AppContext {
         } else {
             are_true_colors_available()
         };
-        let icons = config.icon_theme.as_ref().and_then(|itn| icon_plugin(itn));
+        // Icons are on by default. Users can opt out by setting
+        // `icon_theme: none` in their config.
+        let theme = config.icon_theme.as_deref().unwrap_or("nerdfont");
+        let icons = icon_plugin(theme);
         let mut special_paths: SpecialPaths = (&config.special_paths).try_into()?;
         special_paths.add_defaults();
         let search_modes = config
@@ -240,6 +263,21 @@ impl AppContext {
         let server_name = build_server_name(&launch_args)
             .or_else(|| build_server_name(config_default_args.as_ref()?));
 
+        let bookmarks = build_bookmarks(config.bookmarks.as_deref());
+
+        // Backup suffix: default ".bak"; validate user-supplied value
+        // and fall back to default with a warning on rejection.
+        let backup_suffix = match config.backup_suffix.as_deref() {
+            Some(s) if is_valid_backup_suffix(s) => s.to_string(),
+            Some(s) => {
+                warn!(
+                    "invalid backup_suffix {s:?} (empty or contains '/', '\\\\', or NUL); falling back to \".bak\""
+                );
+                ".bak".to_string()
+            }
+            None => ".bak".to_string(),
+        };
+
         Ok(Self {
             is_tty,
             initial_root,
@@ -277,6 +315,8 @@ impl AppContext {
             lines_before_match_in_preview: config.lines_before_match_in_preview.unwrap_or(0),
             preview_transformers,
             layout_instructions,
+            bookmarks,
+            backup_suffix,
             server_name,
         })
     }
@@ -393,4 +433,151 @@ fn build_server_name(args: &Args) -> Option<String> {
         return Some(crate::net::random_server_name());
     }
     None
+}
+
+/// Test-only helpers for this module's `#[cfg(test)]` tree.
+///
+/// Currently houses `context_with_backup_suffix`, used only by the
+/// `tests` module below to exercise the validation + fallback logic
+/// for `backup_suffix`. No out-of-module callers — kept in a nested
+/// module purely to group fixture code separately from production
+/// items.
+#[cfg(test)]
+mod test_helpers {
+    use {
+        super::*,
+        crate::{
+            conf::{Conf, parse_default_flags},
+            verb::VerbStore,
+        },
+    };
+
+    /// Build an `AppContext` from a `Conf` whose only customisation is
+    /// the `backup_suffix` field. Lets callers assert the validation +
+    /// fallback logic without standing up a full config file.
+    pub(super) fn context_with_backup_suffix(backup_suffix: Option<&str>) -> AppContext {
+        let mut config = Conf {
+            backup_suffix: backup_suffix.map(str::to_string),
+            ..Conf::default()
+        };
+        let verb_store = VerbStore::new(&mut config).unwrap();
+        let launch_args = parse_default_flags("").unwrap();
+        AppContext::from(launch_args, verb_store, &config).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an `AppContext` from a `Conf` whose only customisation is the
+    /// `icon_theme` field. Mirrors the `Default` impl above but lets us
+    /// inspect resolution behaviour for that single setting.
+    fn context_with_icon_theme(icon_theme: Option<&str>) -> AppContext {
+        let mut config = Conf::default();
+        config.icon_theme = icon_theme.map(str::to_string);
+        let verb_store = VerbStore::new(&mut config).unwrap();
+        let launch_args = parse_default_flags("").unwrap();
+        AppContext::from(launch_args, verb_store, &config).unwrap()
+    }
+
+    #[test]
+    fn missing_icon_theme_defaults_to_nerdfont() {
+        // No `icon_theme` set → icons are on by default (the new policy).
+        let ctx = context_with_icon_theme(None);
+        assert!(
+            ctx.icons.is_some(),
+            "icons should be enabled when icon_theme is unset",
+        );
+    }
+
+    #[test]
+    fn explicit_nerdfont_still_works() {
+        let ctx = context_with_icon_theme(Some("nerdfont"));
+        assert!(ctx.icons.is_some());
+    }
+
+    #[test]
+    fn explicit_vscode_still_works() {
+        let ctx = context_with_icon_theme(Some("vscode"));
+        assert!(ctx.icons.is_some());
+    }
+
+    #[test]
+    fn explicit_none_disables_icons() {
+        let ctx = context_with_icon_theme(Some("none"));
+        assert!(
+            ctx.icons.is_none(),
+            "icon_theme: none should yield no icon plugin",
+        );
+    }
+
+    // -- backup_suffix --------------------------------------------------
+
+    // The `context_with_backup_suffix` helper lives in the nested
+    // `test_helpers` module below.
+    use super::test_helpers::context_with_backup_suffix;
+
+    #[test]
+    fn is_valid_backup_suffix_accepts_typical_values() {
+        assert!(is_valid_backup_suffix(".bak"));
+        assert!(is_valid_backup_suffix("~"));
+        assert!(is_valid_backup_suffix(".backup"));
+        assert!(is_valid_backup_suffix(".orig"));
+        assert!(is_valid_backup_suffix("_backup"));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_empty() {
+        assert!(!is_valid_backup_suffix(""));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_forward_slash() {
+        assert!(!is_valid_backup_suffix("/bak"));
+        assert!(!is_valid_backup_suffix("bak/"));
+        assert!(!is_valid_backup_suffix(".b/a/k"));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_backslash() {
+        assert!(!is_valid_backup_suffix("\\bak"));
+        assert!(!is_valid_backup_suffix(".b\\ak"));
+    }
+
+    #[test]
+    fn is_valid_backup_suffix_rejects_nul() {
+        assert!(!is_valid_backup_suffix("\0"));
+        assert!(!is_valid_backup_suffix(".b\0ak"));
+    }
+
+    #[test]
+    fn missing_backup_suffix_defaults_to_dot_bak() {
+        let ctx = context_with_backup_suffix(None);
+        assert_eq!(ctx.backup_suffix, ".bak");
+    }
+
+    #[test]
+    fn valid_backup_suffix_is_stored_verbatim() {
+        let ctx = context_with_backup_suffix(Some(".orig"));
+        assert_eq!(ctx.backup_suffix, ".orig");
+    }
+
+    #[test]
+    fn unusual_but_valid_suffix_is_accepted() {
+        let ctx = context_with_backup_suffix(Some("~"));
+        assert_eq!(ctx.backup_suffix, "~");
+    }
+
+    #[test]
+    fn empty_backup_suffix_falls_back_to_default() {
+        let ctx = context_with_backup_suffix(Some(""));
+        assert_eq!(ctx.backup_suffix, ".bak");
+    }
+
+    #[test]
+    fn slash_in_backup_suffix_falls_back_to_default() {
+        let ctx = context_with_backup_suffix(Some("../escape"));
+        assert_eq!(ctx.backup_suffix, ".bak");
+    }
 }

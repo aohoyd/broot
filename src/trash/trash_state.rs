@@ -87,6 +87,7 @@ impl TrashState {
                         state: Box::new(ts),
                         purpose: PanelPurpose::None,
                         direction: HDir::Right,
+                        activate: false,
                     }
                 } else {
                     CmdResult::NewState {

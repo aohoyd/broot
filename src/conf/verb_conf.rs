@@ -57,6 +57,12 @@ pub struct VerbConf {
 
     pub auto_exec: Option<bool>,
 
+    /// If `Some(true)`, the verb prompts for confirmation before
+    /// executing. If `Some(false)`, an existing built-in confirmation
+    /// (e.g. `rm`) is suppressed. `None` keeps the verb's default.
+    #[serde(default)]
+    pub confirm: Option<bool>,
+
     pub switch_terminal: Option<bool>,
 
     /// The type of panels filtering the verb

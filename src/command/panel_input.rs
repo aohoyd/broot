@@ -496,6 +496,15 @@ impl PanelInput {
             return Command::from_parts(parts, true);
         }
 
+        // In modal mode, Enter in Input mode (without a verb invocation)
+        // accepts the current filter and switches to Command mode
+        if key == key!(enter) && con.modal && mode == Mode::Input {
+            return Command::Internal {
+                internal: Internal::mode_command,
+                input_invocation: None,
+            };
+        }
+
         // a '?' opens the help when it's the first char or when it's part
         // of the verb invocation. It may be used as a verb name in other cases
         if (key == key!('?') || key == key!(shift - '?'))
@@ -536,5 +545,187 @@ impl PanelInput {
             return Command::from_raw(self.input_field.get_content(), false);
         }
         Command::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pin tests for the Mode::Command-vs-Mode::Input gating at the
+    //! `is_key_only_modal` boundary. `is_key_allowed_for_verb` consults
+    //! `keys::is_key_only_modal` for every non-arrow key: in Mode::Input
+    //! a "modal-only" key is dropped (so it can't reach the verb lookup
+    //! and falls through to filter input); in Mode::Command every key
+    //! is allowed. These tests lock in which keys are modal-only so a
+    //! refactor of `is_key_only_modal` can't silently regress the vim
+    //! bindings (Task 5) or the always-available alt-modifier verbs.
+    //!
+    //! The bare-letter / alt-modifier tests exercise `is_key_only_modal`
+    //! directly because the rest of `is_key_allowed_for_verb`'s Mode::Input
+    //! arm is a one-liner (`!is_key_only_modal(key)` gated on `match mode`)
+    //! — pinning the gate is equivalent to pinning the function for those
+    //! key shapes.
+    //!
+    //! The two cursor-movement arms (`key!(left)` / `key!(right)`) cannot
+    //! be covered by `is_key_only_modal` alone — they consult the
+    //! `InputField` cursor position. `PanelInput::new(area)` is the entire
+    //! constructor (no `AppContext` / `AppPanels` needed), so we can drive
+    //! the arrow-key branch end-to-end. Those tests live below the bare-
+    //! letter pins.
+    use {
+        super::*,
+        crate::keys,
+        crokey::key,
+        termimad::Area,
+    };
+
+    // Bare letters are modal-only: Mode::Input drops them; only
+    // Mode::Command lets them reach the verb lookup.
+
+    #[test]
+    fn bare_letter_r_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('r')));
+    }
+
+    #[test]
+    fn bare_letter_d_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('d')));
+    }
+
+    #[test]
+    fn bare_letter_g_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('g')));
+    }
+
+    #[test]
+    fn bare_letter_q_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!('q')));
+    }
+
+    /// Shifted-letter keys (terminals emit these with KeyModifiers::SHIFT
+    /// + the upper-case Char) are ALSO modal-only — they would otherwise
+    /// fall through to filter input in Mode::Input and produce a typed
+    /// upper-case letter rather than firing the bound verb. Pins
+    /// shift-G (jump-to-last) as the representative case; the same
+    /// gate applies to shift-N, shift-R, shift-D, etc.
+    #[test]
+    fn shifted_letter_g_gated_by_command_mode() {
+        assert!(keys::is_key_only_modal(key!(shift - g)));
+    }
+
+    // alt-modifier keys are NOT modal-only: they're allowed in both
+    // Mode::Input and Mode::Command, so they never get sent to filter
+    // input.
+
+    #[test]
+    fn alt_dot_allowed_in_both_modes() {
+        assert!(!keys::is_key_only_modal(key!(alt - '.')));
+    }
+
+    #[test]
+    fn alt_g_allowed_in_both_modes() {
+        assert!(!keys::is_key_only_modal(key!(alt - g)));
+    }
+
+    #[test]
+    fn alt_s_allowed_in_both_modes() {
+        assert!(!keys::is_key_only_modal(key!(alt - s)));
+    }
+
+    // ---- left/right arrow gating: the InputField-aware arms ------------
+    //
+    // `is_key_allowed_for_verb` has two special arms for
+    // `key!(left)` / `key!(right)` in Mode::Input that consult
+    // `input_field.can_move_left()` / `can_move_right()`. The intent: if
+    // the cursor is already at the left edge of an empty / left-justified
+    // input, `left` should not be eaten by the input (which has nowhere
+    // to go) — it should fall through to whatever verb (e.g. `:back`,
+    // `:parent`) is bound to `left`. The mirror argument applies for
+    // `right`. When the cursor is in the middle of typed text, the arrow
+    // belongs to the input.
+    //
+    // `PanelInput::new(area)` constructs a fresh input — `InputField::new`
+    // starts with empty content and cursor at the origin (verified
+    // against the termimad source: `InputFieldContent::default()` and
+    // `Pos::default()` for scroll). No `AppContext` / `AppPanels` is
+    // needed to drive `is_key_allowed_for_verb`; the function is a
+    // method on `PanelInput` alone.
+
+    fn fresh_input() -> super::PanelInput {
+        // 80 wide × 1 tall is the standard mono-line input row geometry.
+        super::PanelInput::new(Area::new(0, 0, 80, 1))
+    }
+
+    #[test]
+    fn cursor_at_left_edge_allows_left_as_verb() {
+        // Empty input: cursor is at position 0, can_move_left() == false.
+        // The `key!(left)` arm in is_key_allowed_for_verb returns
+        // `!can_move_left()` = `true`, so the verb-lookup path is taken
+        // (the keystroke is allowed to fire a `left`-bound verb).
+        let pi = fresh_input();
+        assert!(
+            pi.is_key_allowed_for_verb(key!(left), Mode::Input),
+            "cursor at the left edge must allow `left` through to the \
+             verb lookup so :back / :parent can bind to it",
+        );
+    }
+
+    #[test]
+    fn cursor_after_char_blocks_left_as_verb() {
+        // Type a char: cursor advances to position 1, can_move_left()
+        // becomes true, the arm returns `false` and `left` is reserved
+        // for the input field (cursor motion).
+        let mut pi = fresh_input();
+        pi.input_field.put_char('x');
+        assert!(
+            !pi.is_key_allowed_for_verb(key!(left), Mode::Input),
+            "with cursor inside typed text, `left` must be eaten by the \
+             input field for cursor motion, not routed to a verb",
+        );
+    }
+
+    #[test]
+    fn cursor_at_right_edge_allows_right_as_verb() {
+        // Empty input: cursor at position 0 is ALSO the right edge
+        // (nothing to move past), so can_move_right() == false and
+        // `right` falls through to verb lookup. This is the mirror of
+        // the cursor-at-left case and is what lets a `right`-bound verb
+        // fire from an empty input row.
+        let pi = fresh_input();
+        assert!(
+            pi.is_key_allowed_for_verb(key!(right), Mode::Input),
+            "cursor at the right edge (empty input) must allow `right` \
+             through to the verb lookup",
+        );
+    }
+
+    #[test]
+    fn cursor_before_char_blocks_right_as_verb() {
+        // Type a char then move the cursor back to the start: cursor at
+        // position 0 with content "x" → can_move_right() == true (the
+        // cursor can advance into the 'x'), so `right` is reserved for
+        // input cursor motion.
+        let mut pi = fresh_input();
+        pi.input_field.put_char('x');
+        pi.input_field.move_to_start();
+        assert!(
+            !pi.is_key_allowed_for_verb(key!(right), Mode::Input),
+            "with the cursor before typed content, `right` must be eaten \
+             by the input field for forward cursor motion",
+        );
+    }
+
+    #[test]
+    fn command_mode_always_allows_left_and_right() {
+        // The Mode::Command arm is unconditional `true`: arrows can
+        // never be consumed by the input field in Command mode (the
+        // input field is not active), so they always reach the verb
+        // lookup. Pin both cursor positions to confirm the cursor state
+        // is not consulted.
+        let mut pi = fresh_input();
+        assert!(pi.is_key_allowed_for_verb(key!(left), Mode::Command));
+        assert!(pi.is_key_allowed_for_verb(key!(right), Mode::Command));
+        pi.input_field.put_char('x');
+        assert!(pi.is_key_allowed_for_verb(key!(left), Mode::Command));
+        assert!(pi.is_key_allowed_for_verb(key!(right), Mode::Command));
     }
 }
