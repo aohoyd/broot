@@ -146,8 +146,17 @@ external `rename` verb bind F2. `find_key_verb` returns the first
 verb in registration order whose filters pass, so the internal wins.
 F2 always goes through the bulk flow — `run_bulk_rename` collects
 paths via the shared `collect_bulk_paths` helper
-(`stage || [selection]`, `src/app/app.rs:1492`), so a single
-selection is treated as a 1-element bulk run. The external `rename`
+(`src/app/app.rs:1498`). The helper uses the stage **only when the
+stage panel is the active panel**; from a tree/preview panel it
+returns the single current selection even when the stage is
+non-empty (F2 while browsing renames the browsed file, not the
+staged set — to rename the stage, focus the stage panel first).
+This matches the `PanelStateType::Stage` gate already used by
+`maybe_bulk_stage_confirm`, so the confirm overlay and the path
+collection agree. A single selection is treated as a 1-element bulk
+run. Cut/copy from staging (`copy_from_staging` /
+`move_from_staging`) are unaffected — they read the stage directly
+and always operate on it. The external `rename`
 verb is still callable as a typed `:rename newname` invocation from
 the command bar, but F2 no longer reaches it. The pin test
 `f2_resolves_to_internal_bulk_rename_before_external_rename`
@@ -199,7 +208,9 @@ the test fails so the dead receiver gets removed.
 (`src/app/app.rs:108`) is the payload field, mirroring
 `pending_bulk_rename`. `run_backup` (`src/app/app.rs:896`)
 collects paths via the shared `collect_bulk_paths` helper
-(`stage || [selection]`, `src/app/app.rs:1492`), plans the bulk
+(`src/app/app.rs:1498` — stage only when the stage panel is the
+active panel, otherwise the current selection; see the F2 paragraph
+in the bulk-rename sub-section), plans the bulk
 run via `plan_bulk_backup`, stashes it on `pending_backup`, and
 opens a confirm overlay with `Command::from_raw(":backup_apply",
 true)` as the pending command. `run_backup_apply`

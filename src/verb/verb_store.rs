@@ -321,8 +321,8 @@ impl VerbStore {
         self.add_internal(focus_panel_left);
         self.add_internal(focus_panel_right);
         self.add_internal(panel_left_no_open)
-            .with_key(key!(ctrl - left));
-        self.add_internal(panel_right).with_key(key!(ctrl - right));
+            .with_key(key!(shift - left));
+        self.add_internal(panel_right).with_key(key!(shift - right));
         self.add_internal(print_path).with_shortcut("pp");
         self.add_internal(print_relative_path).with_shortcut("prp");
         self.add_internal(print_tree).with_shortcut("pt");
@@ -342,10 +342,10 @@ impl VerbStore {
         self.add_internal(show);
         self.add_internal(clear_stage).with_shortcut("cls");
         self.add_internal(copy_from_staging)
-            .with_key(key!('y'))
+            .with_key(key!(shift - p))
             .with_shortcut("cfs");
         self.add_internal(move_from_staging)
-            .with_key(key!('x'))
+            .with_key(key!(shift - x))
             .with_shortcut("mfs");
         // `+`, `=` and `ctrl-g` all bind `stage` (add-only + advance).
         // `toggle_stage` stays registered (callable as `:toggle_stage` from
@@ -1020,13 +1020,14 @@ mod vim_bindings_tests {
         // that crossterm emits for `Shift+G`.
         let internal_bindings: &[(KeyCombination, Internal)] = &[
             (key!('r'), Internal::bulk_rename),
-            // y/x are NOT clipboard-gated — `copy_from_staging` and
-            // `move_from_staging` move files between paths, they don't
-            // touch the system clipboard. The four `clipboard` verbs
-            // (copy_name, copy_path, copy_file_content, plus shift-Y)
-            // live in `vim_bindings_resolve_clipboard` below.
-            (key!('y'), Internal::copy_from_staging),
-            (key!('x'), Internal::move_from_staging),
+            // Shift+P / Shift+X are NOT clipboard-gated —
+            // `copy_from_staging` and `move_from_staging` move files
+            // between paths, they don't touch the system clipboard. The
+            // four `clipboard` verbs (copy_name, copy_path,
+            // copy_file_content, plus shift-Y) live in
+            // `vim_bindings_resolve_clipboard` below.
+            (key!(shift - p), Internal::copy_from_staging),
+            (key!(shift - x), Internal::move_from_staging),
             (key!('o'), Internal::open_sort_overlay),
             (key!('b'), Internal::bookmarks),
             (key!('='), Internal::stage),
@@ -1100,9 +1101,10 @@ mod vim_bindings_tests {
     /// when the `clipboard` feature is enabled. Their key bindings live
     /// alongside the registrations and so are also feature-gated.
     ///
-    /// Note: `y` (`copy_from_staging`) and `x` (`move_from_staging`) are
-    /// NOT in this list — they copy/move files between paths and are
-    /// registered unconditionally. They're pinned in `vim_bindings_resolve`.
+    /// Note: Shift+P (`copy_from_staging`) and Shift+X
+    /// (`move_from_staging`) are NOT in this list — they copy/move files
+    /// between paths and are registered unconditionally. They're pinned
+    /// in `vim_bindings_resolve`.
     #[cfg(feature = "clipboard")]
     #[test]
     fn vim_bindings_resolve_clipboard() {

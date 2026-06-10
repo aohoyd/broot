@@ -764,7 +764,8 @@ impl App {
 
     /// Run the bulk-rename entry leg. Drives the user through the
     /// $EDITOR → parse → plan → confirm-overlay pipeline using the
-    /// unified path collection (`stage || [selection]`). N=1 is the
+    /// unified path collection (the stage when the stage panel is
+    /// active, otherwise the current selection). N=1 is the
     /// single-file rename case and flows through the same pipeline —
     /// one editor line, one ConfirmOverlay row — no separate fast
     /// path.
@@ -777,13 +778,16 @@ impl App {
         &mut self,
         app_state: &mut AppState,
     ) -> Result<(), ProgramError> {
-        // Unified path collection via `collect_bulk_paths`: empty
-        // stage falls back to the current selection, treating
-        // single-file as N=1 bulk. The bulk machinery
-        // (`bulk_rename::serialize/parse/plan/apply`) already handles
-        // N=1 cleanly — one editor line, one ConfirmOverlay row.
+        // Unified path collection via `collect_bulk_paths`: the stage
+        // is used only when the stage panel is the active panel,
+        // otherwise the current selection (N=1 bulk). The bulk
+        // machinery (`bulk_rename::serialize/parse/plan/apply`)
+        // already handles N=1 cleanly — one editor line, one
+        // ConfirmOverlay row.
+        let stage_panel_active =
+            self.panels.state().get_type() == PanelStateType::Stage;
         let selection = self.panels.state().selected_path();
-        let paths = collect_bulk_paths(&app_state.stage, selection);
+        let paths = collect_bulk_paths(&app_state.stage, selection, stage_panel_active);
         if paths.is_empty() {
             self.panels
                 .mut_panel()
@@ -873,8 +877,8 @@ impl App {
     }
 
     /// Drive the `:backup` trigger. Unified flow: collect paths from
-    /// the stage (or fall back to the active panel's selection when
-    /// the stage is empty), plan the bulk run, stash it on
+    /// the stage when the stage panel is active (otherwise the active
+    /// panel's current selection), plan the bulk run, stash it on
     /// `self.pending_backup`, and open a confirm overlay listing the
     /// `src → dst` rows. The overlay's `CloseAndRun` re-dispatches
     /// `:backup_apply`, which `mem::take`s the stash and runs
@@ -882,8 +886,8 @@ impl App {
     ///
     /// The bulk machinery handles N=1 cleanly — single-file backup is
     /// just a one-row bulk run, no separate code path. Path collection
-    /// uses `collect_bulk_paths` (the shared `stage || [selection]`
-    /// helper).
+    /// uses `collect_bulk_paths` (stage when the stage panel is active,
+    /// else the current selection).
     ///
     /// Cap-exhaust handling: if any planned row has `dst == src` (every
     /// `.bak.N` candidate already exists), the overlay is NOT opened.
@@ -898,8 +902,10 @@ impl App {
         app_state: &mut AppState,
         con: &mut AppContext,
     ) -> Result<(), ProgramError> {
+        let stage_panel_active =
+            self.panels.state().get_type() == PanelStateType::Stage;
         let selection = self.panels.state().selected_path();
-        let paths = collect_bulk_paths(&app_state.stage, selection);
+        let paths = collect_bulk_paths(&app_state.stage, selection, stage_panel_active);
         if paths.is_empty() {
             self.panels
                 .mut_panel()
@@ -1477,32 +1483,35 @@ fn take_pending_bulk_rename_or_error(
 /// Single source of truth for the bulk-flow path-collection
 /// predicate (shared by `run_bulk_rename` and `run_backup`):
 /// `paths = stage || [selection]`. Empty stage falls back to the
-/// current selection (treating single-file as N=1 bulk); a non-empty
-/// stage uses its paths and the selection is ignored. Returns an
-/// empty vector only when the stage is empty AND there is no
-/// selection — production callers convert that to a "no selection"
-/// status error.
+/// current selection (treating single-file as N=1 bulk).
 ///
-/// Cross-panel behaviour is INTENTIONAL: a non-empty stage takes
-/// precedence over the active panel's selection even when the user
-/// triggers the verb from the browser/tree panel. Pressing F2 while
-/// browsing an unrelated file with a non-empty stage opens the bulk
-/// editor over the staged paths, not over the current selection. The
-/// rationale: the stage IS the user's pending work-set; if it's
-/// non-empty they care about it. Users who want to operate on the
-/// current selection alone clear the stage first (`:clear_stage`) or
-/// unstage individually (`-`).
+/// The stage is only consulted when `stage_panel_active` is true —
+/// i.e. the stage panel is the active panel. From a tree/preview
+/// panel the verb acts on the active panel's single selection even
+/// when the stage is non-empty: pressing F2 while browsing an
+/// unrelated file renames THAT file, not the staged set. To operate
+/// on the staged paths the user focuses the stage panel first. This
+/// matches the gate `maybe_bulk_stage_confirm` already uses
+/// (`PanelStateType::Stage`), so the confirm overlay and the path
+/// collection agree. Cut/copy from staging (`copy_from_staging` /
+/// `move_from_staging`) are unaffected — they read the stage
+/// directly and always operate on it.
+///
+/// Returns an empty vector when no paths apply (no selection, or an
+/// empty stage while the stage panel is active) — production callers
+/// convert that to a "no selection" status error.
 ///
 /// Extracted so the predicate is unit-testable without constructing
 /// an `App`.
 fn collect_bulk_paths(
     stage: &crate::stage::Stage,
     selection: Option<&Path>,
+    stage_panel_active: bool,
 ) -> Vec<PathBuf> {
-    if stage.is_empty() {
-        selection.map(|p| vec![p.to_path_buf()]).unwrap_or_default()
-    } else {
+    if stage_panel_active && !stage.is_empty() {
         stage.paths().to_vec()
+    } else {
+        selection.map(|p| vec![p.to_path_buf()]).unwrap_or_default()
     }
 }
 
@@ -2408,9 +2417,10 @@ mod bulk_rename_routing_tests {
     }
 
     /// Pin the unified path-collection predicate used by
-    /// `run_bulk_rename`: an empty stage falls back to a single-path
-    /// `[selection]` vector; a non-empty stage uses its paths verbatim
-    /// and the selection is ignored.
+    /// `run_bulk_rename`: the stage is consulted ONLY when the stage
+    /// panel is active. From a tree/preview panel the helper always
+    /// yields the single `[selection]` vector even when the stage is
+    /// non-empty.
     ///
     /// We test the predicate via the free helper `collect_bulk_paths`
     /// rather than driving `run_bulk_rename` end-to-end (which would
@@ -2422,64 +2432,97 @@ mod bulk_rename_routing_tests {
         use crate::stage::Stage;
         let stage = Stage::default();
         let selection = std::path::Path::new("/tmp/sole.txt");
-        let paths = super::collect_bulk_paths(&stage, Some(selection));
-        assert_eq!(
-            paths,
-            vec![std::path::PathBuf::from("/tmp/sole.txt")],
-            "empty stage must yield exactly [selection]",
-        );
+        // Empty stage → selection regardless of the active panel.
+        for stage_panel_active in [false, true] {
+            let paths = super::collect_bulk_paths(&stage, Some(selection), stage_panel_active);
+            assert_eq!(
+                paths,
+                vec![std::path::PathBuf::from("/tmp/sole.txt")],
+                "empty stage must yield exactly [selection]",
+            );
+        }
     }
 
     #[test]
-    fn bulk_rename_with_stage_uses_stage_paths() {
+    fn bulk_rename_stage_panel_active_uses_stage_paths() {
         use crate::stage::Stage;
         let mut stage = Stage::default();
         stage.add(std::path::PathBuf::from("/tmp/a.txt"));
         stage.add(std::path::PathBuf::from("/tmp/b.txt"));
         // Selection that is intentionally NOT in the stage — must be
-        // ignored when the stage is non-empty.
+        // ignored when the stage panel is active.
         let selection = std::path::Path::new("/tmp/ignored.txt");
-        let paths = super::collect_bulk_paths(&stage, Some(selection));
+        let paths = super::collect_bulk_paths(&stage, Some(selection), true);
         assert_eq!(
             paths,
             vec![
                 std::path::PathBuf::from("/tmp/a.txt"),
                 std::path::PathBuf::from("/tmp/b.txt"),
             ],
-            "non-empty stage must yield its paths and ignore the selection",
+            "stage panel active must yield the stage paths and ignore the selection",
         );
     }
 
-    /// Single-file stage still goes through the bulk path: the helper
-    /// returns the single stage path; the selection (even if `Some`)
-    /// is ignored. Pins that the "non-empty stage" branch fires at
-    /// N=1, matching the unification.
+    /// The regression this change pins: from a tree/preview panel
+    /// (`stage_panel_active == false`), a non-empty stage is IGNORED
+    /// and the verb operates on the single current selection. F2 while
+    /// browsing renames the browsed file, not the staged set.
     #[test]
-    fn bulk_rename_single_stage_entry_uses_stage_not_selection() {
+    fn bulk_rename_stage_panel_inactive_ignores_stage() {
+        use crate::stage::Stage;
+        let mut stage = Stage::default();
+        stage.add(std::path::PathBuf::from("/tmp/a.txt"));
+        stage.add(std::path::PathBuf::from("/tmp/b.txt"));
+        let selection = std::path::Path::new("/tmp/current.txt");
+        let paths = super::collect_bulk_paths(&stage, Some(selection), false);
+        assert_eq!(
+            paths,
+            vec![std::path::PathBuf::from("/tmp/current.txt")],
+            "non-stage panel must use the selection and ignore the non-empty stage",
+        );
+    }
+
+    /// Single-file stage: with the stage panel active the helper
+    /// returns the single stage path (selection ignored); with it
+    /// inactive the helper returns the selection.
+    #[test]
+    fn bulk_rename_single_stage_entry_respects_active_panel() {
         use crate::stage::Stage;
         let mut stage = Stage::default();
         stage.add(std::path::PathBuf::from("/tmp/only.txt"));
         let selection = std::path::Path::new("/tmp/different.txt");
-        let paths = super::collect_bulk_paths(&stage, Some(selection));
+
+        let from_stage = super::collect_bulk_paths(&stage, Some(selection), true);
         assert_eq!(
-            paths,
+            from_stage,
             vec![std::path::PathBuf::from("/tmp/only.txt")],
-            "single-entry stage must use the stage path, not the selection",
+            "stage panel active: single-entry stage must use the stage path",
+        );
+
+        let from_selection = super::collect_bulk_paths(&stage, Some(selection), false);
+        assert_eq!(
+            from_selection,
+            vec![std::path::PathBuf::from("/tmp/different.txt")],
+            "stage panel inactive: must use the selection, not the staged entry",
         );
     }
 
-    /// Empty stage AND no selection: helper returns an empty vector.
-    /// The production handler converts this to a "no selection"
-    /// status error rather than running with zero paths.
+    /// No applicable paths: helper returns an empty vector. The
+    /// production handler converts this to a "no selection" status
+    /// error rather than running with zero paths. Covers both the
+    /// empty-stage-no-selection case and the stage-panel-active-but-
+    /// empty-stage case.
     #[test]
-    fn bulk_rename_empty_stage_no_selection_returns_empty() {
+    fn bulk_rename_no_applicable_paths_returns_empty() {
         use crate::stage::Stage;
         let stage = Stage::default();
-        let paths = super::collect_bulk_paths(&stage, None);
-        assert!(
-            paths.is_empty(),
-            "no stage + no selection must yield an empty path list",
-        );
+        for stage_panel_active in [false, true] {
+            let paths = super::collect_bulk_paths(&stage, None, stage_panel_active);
+            assert!(
+                paths.is_empty(),
+                "no stage + no selection must yield an empty path list",
+            );
+        }
     }
 
     /// Stale-guard pin for `run_bulk_rename_apply`: the receiver
